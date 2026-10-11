@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicWriteJson, validConnections, connectionRouteKey, type ConnectionRoute } from './local-store.js';
 
@@ -29,6 +29,7 @@ export class AgentStore {
     if (raw.version !== 1 || !Array.isArray(raw.agents) || !raw.agents.every(valid) || new Set(raw.agents.map(a => a.id)).size !== raw.agents.length) throw new Error('에이전트 저장 데이터가 손상되었습니다. 원본은 보존했습니다.');
     this.agents = raw.agents;
   }
+  reload(): void { this.agents = new AgentStore(dirname(this.file)).agents; }
   list(): AgentProfile[] { return structuredClone(this.agents); }
   get(id: string): AgentProfile { const agent = this.agents.find(a => a.id === id); if (!agent) throw new Error('에이전트를 찾을 수 없습니다.'); return structuredClone(agent); }
   save(input: Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt'> & {id?: string}): AgentProfile {

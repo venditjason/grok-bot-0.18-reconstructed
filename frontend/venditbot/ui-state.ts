@@ -13,8 +13,8 @@ export type Approval = { approvalId: string; sessionId: string; path: string; op
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type AgentProfile = { automation?: { policyId: string }; id: string; name: string; instructions: string; avatarId?: string; connectionId: string; model: string; effort?: string; connections?: AgentConnection[]; workspacePath?: string; createdAt: string; updatedAt: string };
 export type AgentDraft = Omit<AgentProfile, 'id' | 'createdAt' | 'updatedAt'> & { id?: string };
-export type TeamProfile = { autonomous?: boolean; id: string; name: string; instructions: string; topic?: string; leaderAgentId?: string; policies?: string; memberAgentIds: string[]; rounds: number; createdAt: string; updatedAt: string };
-export type TeamDraft = Omit<TeamProfile, 'id' | 'createdAt' | 'updatedAt'> & { id?: string };
+export type TeamProfile = { creation?: {requestId: string; inputHash: string; leaderAgentId: string; policyId: string}; autonomous?: boolean; id: string; name: string; instructions: string; topic?: string; leaderAgentId?: string; policies?: string; memberAgentIds: string[]; rounds: number; createdAt: string; updatedAt: string };
+export type TeamDraft = Omit<TeamProfile, 'id' | 'createdAt' | 'updatedAt' | 'creation'> & { id?: string; leaderMode?: 'existing' | 'automatic'; requestId?: string; projectBrief?: string; workspacePath?: string };
 export type TeamStep = { sessionId: string; agentId: string; agentName: string; round: number; kind: 'plan' | 'work' | 'summary'; task?: string; taskKind?: 'routine' | 'standard' | 'complex'; connections?: AgentConnection[]; parentSessionId?: string; status: TaskStatus | 'pending' };
 export type TeamMessage = { id: string; fromAgentId?: string; fromAgentName: string; toAgentId?: string; text: string; kind: 'user' | 'agent' | 'result' | 'system'; sessionId?: string; createdAt: string };
 export type TeamRunSummary = { autonomous?: boolean; id: string; previousRunId?: string; teamId: string; teamName: string; goal: string; topic?: string; leaderAgentId?: string; policies?: string; status: TaskStatus; rounds: number; createdAt: string; updatedAt: string; members: { id: string; name: string }[]; steps: TeamStep[]; finalSessionId?: string; messageCount: number; error?: string };
@@ -209,14 +209,16 @@ export function teamRunInProgress(run?: TeamRunSummary): boolean {
 
 export function teamDraftForRequest(draft: TeamDraft, agents: AgentProfile[]): TeamDraft {
   if (!draft.name.trim()) throw new Error('팀 이름을 입력하세요.');
-  if (draft.memberAgentIds.length < 1) throw new Error('팀 대표로 사용할 에이전트를 한 명 이상 선택하세요.');
+  const automatic = !draft.id && draft.leaderMode === 'automatic';
+  if (automatic && (!draft.projectBrief?.trim() || !draft.requestId)) throw new Error('프로젝트 내용을 입력하고 대표 자동 생성 방식을 다시 확인하세요.');
+  if (!automatic && draft.memberAgentIds.length < 1) throw new Error('팀 대표로 사용할 에이전트를 한 명 이상 선택하세요.');
   if (new Set(draft.memberAgentIds).size !== draft.memberAgentIds.length) throw new Error('같은 에이전트를 중복 선택할 수 없습니다.');
   const availableIds = new Set(agents.map(agent => agent.id));
   if (draft.memberAgentIds.some(id => !availableIds.has(id))) throw new Error('삭제된 에이전트가 있습니다. 팀 멤버를 다시 선택하세요.');
   const leaderAgentId = draft.leaderAgentId || draft.memberAgentIds[0]!;
-  if (!draft.memberAgentIds.includes(leaderAgentId)) throw new Error('팀 멤버 중 대표를 선택하세요.');
+  if (!automatic && !draft.memberAgentIds.includes(leaderAgentId)) throw new Error('팀 멤버 중 대표를 선택하세요.');
   if (draft.autonomous !== undefined && typeof draft.autonomous !== 'boolean') throw new Error('대표 자율주행 설정이 올바르지 않습니다.');
-  return { ...draft, autonomous: draft.autonomous === true, name: draft.name.trim(), instructions: draft.instructions.trim(), topic: (draft.topic ?? '').trim(), policies: (draft.policies ?? '').trim(), leaderAgentId, rounds: 1, memberAgentIds: [...draft.memberAgentIds] };
+  return { ...draft, ...(automatic ? {projectBrief: draft.projectBrief!.trim()} : {}), autonomous: automatic || draft.autonomous === true, name: draft.name.trim(), instructions: draft.instructions.trim(), topic: (draft.topic ?? '').trim(), policies: (draft.policies ?? '').trim(), leaderAgentId, rounds: 1, memberAgentIds: [...draft.memberAgentIds] };
 }
 
 export function moveTeamMember(ids: string[], index: number, offset: -1 | 1): string[] {
@@ -272,11 +274,28 @@ export async function refreshAfter<T>(operation: () => Promise<T>, refresh: () =
 /** A response started before a native event or local edit cannot replace newer UI state. */
 export class SnapshotClock {
   private revision = 0;
+  private request = 0;
+  private cancelRetry?: () => void;
   changed(): void { this.revision++; }
-  async read<T>(load: () => Promise<T>, apply: (value: T) => void): Promise<T> {
-    const before = ++this.revision;
-    const result = await load();
-    if (before === this.revision) apply(result);
-    return result;
+  cancel(): void { this.request++; this.cancelRetry?.(); }
+  async read<T>(load: () => Promise<T>, apply: (value: T) => void, retryOnChange = false): Promise<T> {
+    this.cancel();
+    const request = this.request;
+    for (;;) {
+      const before = this.revision;
+      const result = await load();
+      if (request !== this.request) return result;
+      if (before === this.revision) { apply(result); return result; }
+      if (!retryOnChange) return result;
+      // A discarded cold-start response has no complete predecessor to retain.
+      // Re-read the whole snapshot; never merge stale fields over newer events.
+      // Yield between attempts so sustained streams cannot create an IPC spin.
+      await new Promise<void>(resolve => {
+        const finish = () => { clearTimeout(timer); this.cancelRetry = undefined; resolve(); };
+        const timer = setTimeout(finish, 32);
+        this.cancelRetry = finish;
+      });
+      if (request !== this.request) return result;
+    }
   }
 }

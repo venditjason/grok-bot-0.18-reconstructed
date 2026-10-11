@@ -38,7 +38,7 @@ bootstrap은 공식 Electron·native CLI만 준비한다. `package.json`과 `pac
 
 | 구성 | 고정 버전 |
 | --- | --- |
-| 벤디트봇 | 0.3.6 |
+| 벤디트봇 | 0.3.7 |
 | Electron | 42.11.12 |
 | 공식 Codex CLI | 0.162.1 |
 | 공식 Claude CLI | 2.1.296 |
@@ -106,6 +106,10 @@ Codex는 공식 `model/list`를 페이지 단위로 조회한다. Claude는 공�
 UI는 로그인 전 모델 폼을 숨기고 로그인 후 목록을 조회한다. 모델 변경·새로고침·계정 변경 뒤 선택을 재검증한다. IPC에서도 지원 모델·effort를 검증하며 실행 직전 공급자 adapter가 다시 검증한다. 미로그인 catalog 응답이나 목록에 나타난 사실은 계정의 실제 추론 권한 증명이 아니다. API 프로필은 수동 모델 ID를 사용하며 현재 API effort 설정은 제공하지 않는다.
 
 ## 에이전트·작업·대기열
+
+새 팀의 `saveTeam`은 `leaderMode: 'automatic'`, UUID `requestId`, `projectBrief`를 받는다. `automatic-team.ts`가 실제 연결 카탈로그의 기본 모델과 지원 effort로 대표·세 가지 난이도 정책·기본 그림을 준비한다. API 연결에는 저장된 키, 성공한 연결 확인, 도구 지원이 필요하다. 동일 요청 ID와 입력은 팀의 durable receipt로 재사용하며 다른 입력은 충돌로 거절한다. `cancelAutomaticTeamCreation`은 commit 전 요청만 취소한다.
+
+`automatic-team-pending.json`은 생성 전 에이전트·정책 상태와 이번 그림 ID를 비공개로 기록한다. 저장소를 열기 전에 복구하며 팀 receipt가 없으면 생성 전 상태를 복원하고, receipt가 있으면 완료된 리소스를 유지한다. 대표는 팀 운영 지침과 구성만 조정할 수 있고 관리자 안전 규칙이나 에이전트 영구 삭제 권한을 얻지 않는다. 자동 생성 화면 초안과 요청 ID도 복원한다.
 
 에이전트 수에는 고정 개수 제한이 없다. agents.json의 직렬화 UTF-8 크기 4MiB 보호는 유지하며 초과 저장은 기존 데이터를 보존하고 거절한다. 이름, 지시문, 선택 폴더와 `connections` 배열을 포함하며 연결 우선순위는 1개부터 8개까지다. 각 항목은 `{connectionId, model, effort?}`다. 저장 시 모든 연결을 검증하고 공식 catalog의 해석된 모델 ID와 기본 effort로 정규화한다. 같은 연결·해석된 모델·effort 조합은 중복으로 거절하지만 같은 공급자의 다른 모델 또는 effort는 허용한다. 이전 단일 연결 데이터는 그대로 읽고, 새 에이전트의 기존 `connectionId/model/effort` 필드는 첫 항목과 동기화한다.
 

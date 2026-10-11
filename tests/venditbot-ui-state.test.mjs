@@ -354,3 +354,25 @@ test('bounded stream stress: 10000 deltas across 1000-session history preserve t
   batcher.dispose(); assert.equal(state.sessions[0].messages.at(-1).text, expected); assert.equal(state.activeRun, null); assert.deepEqual(state.unsavedSessionIds, ['live']);
   t.diagnostic(`bounded synthetic run: 1001 sessions, 102001 messages, 10000 deltas → ${deltaUpdates - 1} active delta updates; 100 late cancelled deltas ignored`);
 });
+
+test('retrying snapshots yield, cancel scheduled work and allow only the newest reader to apply', async t => {
+  const timers = new Map(); let serial = 0;
+  t.mock.method(globalThis, 'setTimeout', callback => { timers.set(++serial, callback); return serial; });
+  t.mock.method(globalThis, 'clearTimeout', id => timers.delete(id));
+  const clock = new SnapshotClock(); let finish, shown = 'native', reads = 0;
+  const old = clock.read(() => { reads++; return new Promise(resolve => { finish = resolve; }); }, value => { shown = value; }, true);
+  clock.changed(); finish('stale'); await Promise.resolve();
+  assert.equal(timers.size, 1); assert.equal(reads, 1); assert.equal(shown, 'native');
+  await clock.read(async () => 'newer authoritative state', value => { shown = value; }, true);
+  await old; assert.equal(timers.size, 0); assert.equal(reads, 1); assert.equal(shown, 'newer authoritative state');
+  const pending = clock.read(async () => { clock.changed(); return 'invalidated'; }, value => { shown = value; }, true);
+  await Promise.resolve(); assert.equal(timers.size, 1);
+  clock.cancel(); await pending; assert.equal(timers.size, 0); assert.equal(shown, 'newer authoritative state');
+});
+
+test('a superseded in-flight reader cannot retry or overwrite a newer applied snapshot', async () => {
+  const clock = new SnapshotClock(); let finish, reads = 0, shown;
+  const old = clock.read(() => { reads++; return new Promise(resolve => { finish = resolve; }); }, value => { shown = value; }, true);
+  clock.changed(); await clock.read(async () => 'current', value => { shown = value; }, true);
+  finish('old'); await old; assert.equal(reads, 1); assert.equal(shown, 'current');
+});
