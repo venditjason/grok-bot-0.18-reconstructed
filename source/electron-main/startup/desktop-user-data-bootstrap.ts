@@ -1,33 +1,18 @@
-import {
-  resolveSandDataRootOverride,
-  resolveSandUserDataDir,
-  SAND_DATA_ROOT_ENV,
-  SAND_USER_DATA_DIR_ENV,
-} from "../../host/host-paths.js";
-import { applyStartupDataRootMigration, resolveExistingSandProductionRootDir, type DataRootSettlement } from "./startup-data-root-migration.js";
-import { applyWindowsUserDataMigration, isWindowsUpdatedLaunch } from "./windows-user-data-migration.js";
+import { join } from "node:path";
+import { resolveSandUserDataDir, SAND_DATA_ROOT_ENV, SAND_USER_DATA_DIR_ENV } from "../../host/host-paths.js";
+import { PRODUCT_IDENTITY } from "../../shared/product-identity.js";
+import { createVenditBotChildEnvironment, ensureVenditBotDirectories, resolveVenditBotPaths } from "../../shared/node/venditbot-paths.js";
+import type { DataRootSettlement } from "./startup-data-root-migration.js";
 
-export const STRANDED_USER_DATA_REASONS = new Set([
-  "canonical-marked",
-  "canonical-unsafe",
-  "conflict-preserved",
-  "legacy-unsafe",
-  "migration-failed",
-]);
-
-export const STRANDED_DATA_ROOT_REASONS = new Set([
-  "canonical-conflict",
-  "canonical-marked",
-  "legacy-unsafe",
-  "live-legacy-host",
-  "migration-failed",
-  "unknown-legacy-writer",
-]);
+export const STRANDED_USER_DATA_REASONS = new Set<string>();
+export const STRANDED_DATA_ROOT_REASONS = new Set<string>();
 
 export interface DesktopBootstrapApp {
   readonly isPackaged: boolean;
   setPath(name: "userData" | "sessionData", path: string): void;
   getPath(name: "appData" | "userData"): string;
+  setName?(name: string): void;
+  setAppLogsPath?(path: string): void;
 }
 
 export interface DesktopUserDataBootstrapOptions {
@@ -37,35 +22,34 @@ export interface DesktopUserDataBootstrapOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
   readonly cwd?: string;
+  readonly homeDir?: string;
   reportFailureClass?(surface: "startup", operation: "user-data-settlement", reason: string): void;
 }
 
-export function bootstrapDesktopUserData(options: DesktopUserDataBootstrapOptions): string | null {
-  const argv = options.argv ?? process.argv;
+/** Runs before the Electron single-instance lock and before any session access. */
+export function bootstrapDesktopUserData(options: DesktopUserDataBootstrapOptions): string {
   const env = options.env ?? process.env;
-  const platform = options.platform ?? process.platform;
-  const isolatedUserDataDir = resolveSandUserDataDir(argv, env, options.cwd ?? process.cwd());
-  if (isolatedUserDataDir != null) {
-    env[SAND_USER_DATA_DIR_ENV] = isolatedUserDataDir;
-    options.app.setPath("userData", isolatedUserDataDir);
-    options.app.setPath("sessionData", isolatedUserDataDir);
-    console.log(`[sand] using isolated user-data dir: ${isolatedUserDataDir}`);
-    return isolatedUserDataDir;
-  }
-  const settlement = applyWindowsUserDataMigration({
-    platform,
-    isPackaged: options.app.isPackaged,
-    isLabBuild: options.isLabBuild,
-    hasIsolatedUserData: false,
-    isUpdatedLaunch: isWindowsUpdatedLaunch(argv),
-    appDataDir: options.app.getPath("appData"),
-    canonicalUserDataDir: options.app.getPath("userData"),
-    setPath: (name, path) => options.app.setPath(name, path),
+  const configured = resolveSandUserDataDir(options.argv ?? process.argv, env, options.cwd ?? process.cwd());
+  if (configured != null) env[SAND_USER_DATA_DIR_ENV] = configured;
+  const paths = resolveVenditBotPaths({
+    env,
+    development: options.isLabBuild || !options.app.isPackaged,
+    ...(options.platform === undefined ? {} : { platform: options.platform }),
+    ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir }),
   });
-  if (STRANDED_USER_DATA_REASONS.has(settlement.reason)) {
-    options.reportFailureClass?.("startup", "user-data-settlement", settlement.reason);
-  }
-  return null;
+  const childEnv = createVenditBotChildEnvironment(env, paths);
+  for (const key of Object.keys(env)) if (!(key in childEnv)) delete env[key];
+  Object.assign(env, childEnv);
+  ensureVenditBotDirectories(paths);
+  env.SAND_PACKAGED = options.app.isPackaged ? "1" : "0";
+  env.SAND_LAB = options.isLabBuild ? "1" : "0";
+  options.app.setName?.(PRODUCT_IDENTITY.displayName);
+  options.app.setPath("userData", paths.profileRoot);
+  options.app.setPath("sessionData", paths.cacheRoot);
+  options.app.setAppLogsPath?.(paths.logsRoot);
+  env[SAND_DATA_ROOT_ENV] = join(paths.profileRoot, "agent-data");
+  console.log(`[venditbot] using isolated user-data dir: ${paths.profileRoot}`);
+  return paths.profileRoot;
 }
 
 export interface DesktopDataRootBootstrapOptions {
@@ -81,20 +65,8 @@ export interface DesktopDataRootBootstrapOptions {
 export function bootstrapDesktopDataRoot(options: DesktopDataRootBootstrapOptions): DataRootSettlement | null {
   if (!options.isPrimaryInstance) return null;
   const env = options.env ?? process.env;
-  if (!options.app.isPackaged && env.SAND_ATTACH_PROD_BOX === "1"
-    && !options.hasIsolatedUserData && resolveSandDataRootOverride(env) == null) {
-    env[SAND_DATA_ROOT_ENV] = resolveExistingSandProductionRootDir(options.homeDir);
-    return null;
-  }
-  const settlement = applyStartupDataRootMigration({
-    isPackaged: options.app.isPackaged,
-    isLabBuild: options.isLabBuild,
-    hasIsolatedUserData: options.hasIsolatedUserData,
-    env,
-    ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir }),
-  });
-  if (STRANDED_DATA_ROOT_REASONS.has(settlement.reason)) {
-    options.reportFailureClass?.("startup", "data-root-settlement", settlement.reason);
-  }
-  return settlement;
+  const paths = resolveVenditBotPaths({ env, development: options.isLabBuild || !options.app.isPackaged, ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir }) });
+  env[SAND_DATA_ROOT_ENV] = join(paths.profileRoot, "agent-data");
+  // VenditBot never runs Grok/Cursor migration or attaches their existing host.
+  return { route: "unchanged", reason: "isolated-user-data" };
 }

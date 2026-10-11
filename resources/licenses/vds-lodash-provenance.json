@@ -1,0 +1,27 @@
+{
+  "package": "lodash",
+  "oldVersion": "4.17.21",
+  "version": "4.18.0",
+  "registry": "https://registry.npmjs.org",
+  "tarball": "https://registry.npmjs.org/lodash/-/lodash-4.18.0.tgz",
+  "tarballIntegrity": "sha512-l1mfj2atMqndAHI3ls7XqPxEjV2J9ZkcNyHpoZA3r2T1LLwDB69jgkMWh71YKwhBbK0G2f4WSn05ahmQXVxupA==",
+  "sourceSha256": "5009c4c4d2bdbeb10b1c89bac5657beee324a0fb5e3de36ce2aefbac5bb5666f",
+  "license": "lodash-4.18.0-LICENSE",
+  "licenseSha256": "f71e8ed126b46346494aad5486874cd8f0aafe95092ed67d2e3cb6110f939abc",
+  "bundle": "frontend/venditbot/vds.js",
+  "originalBundleSha256": "fa12c2f2019114129a4d02e389d7e9b4d6f81b70ef9a61de0c9da4827388f7c3",
+  "patchedBundleSha256": "f92aaeddfef939a4bc8165a31e0ef9a4d05fae0ce6ec3f5804f25c8b7526f920",
+  "originalModuleSha256": "76de1b4bd02d9ac03138a0240b306e28039c98296ef1fa500f894ff55b583604",
+  "patchedModuleSha256": "0ab5de545079c958dadebbc09c456006185fa35c3482753699beddee25895b17",
+  "unchangedPrefixSha256": "d5a0b16f377f052ffe5a7ffa8861c6acb9f7b1e21f88a22a3a0236e1110929d4",
+  "unchangedSuffixSha256": "2f05d46f7db45b737c9bbeeda847503c0dc4cff06e03a66462b83abb497830da",
+  "originalUtf8Bytes": 1584357,
+  "patchedUtf8Bytes": 1894794,
+  "scope": "Only the AST-delimited require_lodash declaration and its adjacent module-path comment are replaced. The official lodash.js source is unmodified; all other VDS bytes are preserved.",
+  "advisories": [
+    "https://github.com/lodash/lodash/security/advisories/GHSA-r5fr-rjxr-66jc",
+    "https://github.com/lodash/lodash/security/advisories/GHSA-f23m-r3pf-42rh",
+    "https://github.com/lodash/lodash/security/advisories/GHSA-xxjr-mmjv-4gpg"
+  ],
+  "reproduction": "See resources/licenses/vds-lodash-README.txt and scripts/patch-vds-lodash.mjs."
+}

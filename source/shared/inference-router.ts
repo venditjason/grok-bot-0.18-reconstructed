@@ -1,4 +1,4 @@
-export const SAND_INFERENCE_PROVIDERS = ["cursor", "claude-code", "codex", "openrouter"] as const;
+export const SAND_INFERENCE_PROVIDERS = ["cursor", "claude-code", "codex", "openrouter", "openai", "anthropic", "openai-compatible"] as const;
 export type SandInferenceProvider = (typeof SAND_INFERENCE_PROVIDERS)[number];
 
 export interface SandInferenceRouterUsageProvider {
@@ -8,6 +8,7 @@ export interface SandInferenceRouterUsageProvider {
   readonly cacheReadTokens: number;
   readonly cacheWriteTokens: number;
   readonly lastUsedAt: string | null;
+  readonly unknownUsageRequests?: number;
 }
 
 export interface SandInferenceRouterUsage {
@@ -21,5 +22,5 @@ export function isSandInferenceProvider(value: unknown): value is SandInferenceP
 
 export function emptySandInferenceRouterUsage(): SandInferenceRouterUsage {
   const empty = (): SandInferenceRouterUsageProvider => ({ requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, lastUsedAt: null });
-  return { schemaVersion: 1, providers: { cursor: empty(), "claude-code": empty(), codex: empty(), openrouter: empty() } };
+  return { schemaVersion: 1, providers: { cursor: empty(), "claude-code": empty(), codex: empty(), openrouter: empty(), openai: empty(), anthropic: empty(), "openai-compatible": empty() } };
 }

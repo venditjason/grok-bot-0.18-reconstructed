@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 
 import { DEFAULT_SAND_THEME_PREFERENCE, isSandThemePreference, type SandThemePreference } from "../../desktop.js";
@@ -11,6 +12,8 @@ import { coerceToEnabledTrack, isSandUpdateTrack, type SandUpdateTrack } from ".
 import { isSandAgentModelSelection, type SandAgentModelSelection } from "../../agents/sand-agent-model.js";
 import { emptySandInferenceRouterUsage, isSandInferenceProvider, type SandInferenceProvider, type SandInferenceRouterUsage } from "../../inference-router.js";
 import { DEFAULT_SAND_BOX_RUNTIME, isSandBoxRuntime, type SandBoxRuntime } from "../../box-runtime.js";
+
+import { normalizeApiProviderProfile, type ApiProvider, type ApiProviderProfile } from "../../api-provider-config.js";
 
 export const SETTINGS_VERSION = 1;
 export const SAND_DOWNGRADE_MAX_FAST_MIGRATION_ID = "downgrade-persisted-max-fast";
@@ -27,6 +30,7 @@ export interface SandStoredSettings {
   userTimeZone?: string; userTimeZoneOverride?: string; autoReviewInstructions?: SandAutoReviewInstructions;
   localToolPermission?: SandLocalToolPermission; localToolPermissionCeiling?: SandLocalToolPermission;
   inferenceProvider?: SandInferenceProvider; inferenceRouterUsage?: SandInferenceRouterUsage;
+  apiProviderProfiles?: ApiProviderProfile[]; activeApiProfileId?: string;
   boxRuntime?: SandBoxRuntime;
   mcpCustomInstructionsAccountScope?: string; pinnedAgentIds?: string[]; sidebarSections?: SidebarSection[];
 }
@@ -69,6 +73,8 @@ function parseSettings(value: unknown): SandStoredSettings | null {
   if (typeof raw.autoReviewInstructions === "object" && raw.autoReviewInstructions != null) result.autoReviewInstructions = normalizeSandAutoReviewInstructions(raw.autoReviewInstructions as Record<string, unknown>);
   if (isSandLocalToolPermission(raw.localToolPermission)) result.localToolPermission = raw.localToolPermission;
   if (isSandLocalToolPermission(raw.localToolPermissionCeiling)) result.localToolPermissionCeiling = raw.localToolPermissionCeiling;
+  if (Array.isArray(raw.apiProviderProfiles)) result.apiProviderProfiles = raw.apiProviderProfiles.flatMap((profile) => { try { return [normalizeApiProviderProfile(profile)]; } catch { return []; } });
+  if (typeof raw.activeApiProfileId === "string" && result.apiProviderProfiles?.some(profile => profile.id === raw.activeApiProfileId)) result.activeApiProfileId = raw.activeApiProfileId;
   if (isSandInferenceProvider(raw.inferenceProvider)) result.inferenceProvider = raw.inferenceProvider;
   if (isSandBoxRuntime(raw.boxRuntime)) result.boxRuntime = raw.boxRuntime;
   if (typeof raw.inferenceRouterUsage === "object" && raw.inferenceRouterUsage != null && !Array.isArray(raw.inferenceRouterUsage)) {
@@ -80,7 +86,7 @@ function parseSettings(value: unknown): SandStoredSettings | null {
         if (typeof item !== "object" || item == null || Array.isArray(item)) continue;
         const record = item as Record<string, unknown>;
         const count = (key: string): number => Number.isSafeInteger(record[key]) && (record[key] as number) >= 0 ? record[key] as number : 0;
-        usage.providers[provider] = { requests: count("requests"), inputTokens: count("inputTokens"), outputTokens: count("outputTokens"), cacheReadTokens: count("cacheReadTokens"), cacheWriteTokens: count("cacheWriteTokens"), lastUsedAt: typeof record.lastUsedAt === "string" ? record.lastUsedAt : null };
+        usage.providers[provider] = { requests: count("requests"), inputTokens: count("inputTokens"), outputTokens: count("outputTokens"), cacheReadTokens: count("cacheReadTokens"), cacheWriteTokens: count("cacheWriteTokens"), unknownUsageRequests: count("unknownUsageRequests"), lastUsedAt: typeof record.lastUsedAt === "string" ? record.lastUsedAt : null };
       }
     }
     result.inferenceRouterUsage = usage;
@@ -91,11 +97,23 @@ function parseSettings(value: unknown): SandStoredSettings | null {
 }
 
 export class SandSettingsStore {
-  constructor(readonly settingsPath: string) {}
+  constructor(readonly settingsPath: string, private readonly options: { failOnCorrupt?: boolean } = {}) {}
   load(): SandStoredSettings {
     if (!existsSync(this.settingsPath)) return emptySettings();
-    try { const parsed = parseSettings(JSON.parse(readFileSync(this.settingsPath, "utf8")) as unknown); return parsed == null ? emptySettings() : this.applyPendingMigrations(parsed); }
-    catch { return emptySettings(); }
+    try {
+      this.checkFile();
+      const raw = JSON.parse(readFileSync(this.settingsPath, "utf8")) as unknown;
+      const parsed = parseSettings(raw);
+      if (this.options.failOnCorrupt) {
+        if (!parsed) throw new Error("Invalid settings format.");
+        const profiles = (raw as Record<string, unknown>).apiProviderProfiles;
+        if (profiles !== undefined && (!Array.isArray(profiles) || profiles.length > 50 || profiles.length !== parsed.apiProviderProfiles?.length || new Set(parsed.apiProviderProfiles.map(profile => profile.id)).size !== profiles.length)) throw new Error("Invalid API profiles.");
+      }
+      return parsed == null ? emptySettings() : this.applyPendingMigrations(parsed);
+    } catch {
+      if (this.options.failOnCorrupt) throw new Error("설정 파일을 읽을 수 없습니다. 원본 파일은 보존했습니다.");
+      return emptySettings();
+    }
   }
   private applyPendingMigrations(settings: SandStoredSettings): SandStoredSettings {
     if (settings.settingsMigrations.includes(SAND_DOWNGRADE_MAX_FAST_MIGRATION_ID)) return settings;
@@ -103,7 +121,20 @@ export class SandSettingsStore {
     try { this.persist(migrated); } catch {}
     return migrated;
   }
-  persist(settings: SandStoredSettings): void { mkdirSync(dirname(this.settingsPath), { recursive: true }); const temp = `${this.settingsPath}.${process.pid}.tmp`; writeFileSync(temp, JSON.stringify(settings, null, 2), "utf8"); renameSync(temp, this.settingsPath); }
+  private checkFile(): void {
+    let stat;
+    try { stat = lstatSync(this.settingsPath); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > 64 * 1024 * 1024) throw new Error("안전하지 않거나 너무 큰 설정 파일입니다.");
+  }
+  persist(settings: SandStoredSettings): void {
+    this.checkFile(); mkdirSync(dirname(this.settingsPath), { recursive: true, mode: 0o700 });
+    const temp = `${this.settingsPath}.${randomUUID()}.tmp`;
+    try {
+      const serialized = JSON.stringify({ ...settings, ...(settings.apiProviderProfiles === undefined ? {} : { apiProviderProfiles: settings.apiProviderProfiles.map(normalizeApiProviderProfile) }) }, null, 2);
+      if (Buffer.byteLength(serialized) > 64 * 1024 * 1024) throw new Error("설정 파일 크기 제한에 도달했습니다.");
+      writeFileSync(temp, serialized, { encoding: "utf8", mode: 0o600, flag: "wx", flush: true }); renameSync(temp, this.settingsPath);
+    } finally { if (existsSync(temp)) unlinkSync(temp); }
+  }
   private update(mutator: (settings: SandStoredSettings) => SandStoredSettings): void { this.persist(mutator(this.load())); }
   getHasSeenOnboarding(): boolean | undefined { return this.load().hasSeenOnboarding; }
   setHasSeenOnboarding(value: boolean): void { this.update((current) => { const { hasSeenOnboardingAccountScope: _old, ...rest } = current; return { ...rest, hasSeenOnboarding: value, ...(rest.mcpCustomInstructionsAccountScope === undefined ? {} : { hasSeenOnboardingAccountScope: rest.mcpCustomInstructionsAccountScope }) }; }); }
@@ -155,15 +186,26 @@ export class SandSettingsStore {
   getLocalToolPermissionChoice(): SandLocalToolPermission { return this.load().localToolPermission ?? SAND_DEFAULT_LOCAL_TOOL_PERMISSION; }
   getLocalToolPermissionCeiling(): SandLocalToolPermission | undefined { return this.load().localToolPermissionCeiling; }
   setLocalToolPermission(value: SandLocalToolPermission): void { this.update((s) => ({ ...s, localToolPermission: value })); }
+  getApiProviderProfiles(): ApiProviderProfile[] { return this.load().apiProviderProfiles ?? []; }
+  setApiProviderProfiles(profiles: readonly ApiProviderProfile[]): void {
+    const normalized = profiles.map(normalizeApiProviderProfile);
+    if (new Set(normalized.map(profile => profile.id)).size !== normalized.length) throw new Error("API profile IDs must be unique.");
+    this.update(settings => { const { activeApiProfileId, ...rest } = settings; return { ...rest, apiProviderProfiles: normalized, ...(normalized.some(profile => profile.id === activeApiProfileId) ? { activeApiProfileId: activeApiProfileId! } : {}) }; });
+  }
+  getActiveApiProfile(provider?: ApiProvider): ApiProviderProfile | undefined {
+    const settings = this.load(), profiles = settings.apiProviderProfiles ?? [];
+    return profiles.find(profile => profile.id === settings.activeApiProfileId && (provider === undefined || profile.provider === provider));
+  }
+  setActiveApiProfileId(id: string): void { this.update(settings => { const profile = settings.apiProviderProfiles?.find(item => item.id === id); if (!profile) throw new Error("API profile was not found."); return { ...settings, activeApiProfileId: id, inferenceProvider: profile.provider }; }); }
   getInferenceProvider(): SandInferenceProvider { return this.load().inferenceProvider ?? "cursor"; }
   setInferenceProvider(value: SandInferenceProvider): void { this.update((s) => ({ ...s, inferenceProvider: value })); }
   getInferenceRouterUsage(): SandInferenceRouterUsage { return this.load().inferenceRouterUsage ?? emptySandInferenceRouterUsage(); }
-  recordInferenceUsage(provider: SandInferenceProvider, usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }): void {
+  recordInferenceUsage(provider: SandInferenceProvider, usage: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; requestCount?: number; usageAvailable?: boolean }): void {
     const safe = (value: number | undefined): number => Number.isFinite(value) && value! >= 0 ? Math.round(value!) : 0;
     this.update((settings) => {
       const current = settings.inferenceRouterUsage ?? emptySandInferenceRouterUsage();
       const previous = current.providers[provider];
-      return { ...settings, inferenceRouterUsage: { schemaVersion: 1, providers: { ...current.providers, [provider]: { requests: previous.requests + 1, inputTokens: previous.inputTokens + safe(usage.inputTokens), outputTokens: previous.outputTokens + safe(usage.outputTokens), cacheReadTokens: previous.cacheReadTokens + safe(usage.cacheReadTokens), cacheWriteTokens: previous.cacheWriteTokens + safe(usage.cacheWriteTokens), lastUsedAt: new Date().toISOString() } } } };
+      return { ...settings, inferenceRouterUsage: { schemaVersion: 1, providers: { ...current.providers, [provider]: { requests: previous.requests + (usage.requestCount === undefined ? 1 : safe(usage.requestCount)), unknownUsageRequests: (previous.unknownUsageRequests ?? 0) + (usage.usageAvailable === false ? (usage.requestCount === undefined ? 1 : safe(usage.requestCount)) : 0), inputTokens: previous.inputTokens + safe(usage.inputTokens), outputTokens: previous.outputTokens + safe(usage.outputTokens), cacheReadTokens: previous.cacheReadTokens + safe(usage.cacheReadTokens), cacheWriteTokens: previous.cacheWriteTokens + safe(usage.cacheWriteTokens), lastUsedAt: new Date().toISOString() } } } };
     });
   }
   setLocalToolPermissionCeiling(value?: SandLocalToolPermission): void { this.update((s) => { const { localToolPermissionCeiling: _old, ...rest } = s; return value === undefined ? rest : { ...rest, localToolPermissionCeiling: value }; }); }
