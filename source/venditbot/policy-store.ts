@@ -1,5 +1,5 @@
 import {existsSync, lstatSync, readFileSync} from 'node:fs';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {normalizeAgentPolicy, normalizeAgentPolicyDraft, type AgentPolicy} from '../shared/agent-policy.js';
 import {atomicWriteJson} from './local-store.js';
@@ -19,6 +19,7 @@ export class PolicyStore {
     this.policies = raw.policies.map(normalizeAgentPolicy);
     if (new Set(this.policies.map(p => p.id)).size !== this.policies.length) throw new Error('중복된 자동 모델 정책 ID입니다. 원본을 보존했습니다.');
   }
+  reload(): void {this.policies = new PolicyStore(dirname(this.file)).policies;}
   list(): AgentPolicy[] {return structuredClone(this.policies);}
   get(id: string): AgentPolicy {const found = this.policies.find(p => p.id === id); if (!found) throw new Error('자동 모델 정책을 찾을 수 없습니다. 설정에서 정책을 확인하세요.'); return structuredClone(found);}
   save(input: unknown, expectedUpdatedAt?: string): AgentPolicy {

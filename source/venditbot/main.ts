@@ -22,6 +22,7 @@ import { startQuitWatchdog } from './quit-watchdog.js';
 import { recommendRoutineConnections } from './delegation-policy.js';
 import type { ProviderModel } from '../shared/provider-model-catalog.js';
 import { LocalUpdater } from './local-updater.js';
+import {AutomaticTeamCreator, recoverAutomaticTeamCreation} from './automatic-team.js';
 import {PolicyStore} from './policy-store.js';
 import {AvatarJobs} from './avatar-jobs.js';
 import {varyAvatarScene, referenceAvatarImage} from './avatar-variation.js';
@@ -53,6 +54,7 @@ configureProviderAuthRuntime({ paths,
   ...(existsSync(claudeExecutable) ? { claudeExecutable } : {}),
   claudeLoginPolicy: { mode: 'personal-local' },
 });
+recoverAutomaticTeamCreation(paths.profileRoot);
 const settings = new SandSettingsStore(join(paths.profileRoot, 'settings.json'), {failOnCorrupt: true});
 const sessions = new LocalSessionStore(paths.profileRoot);
 const agents = new AgentStore(paths.profileRoot);
@@ -137,6 +139,29 @@ teams = new TeamCoordinator(teamStore, {
   renameAgent: renameSavedAgent,
   policyForAgent: member => member.automation ? policies.get(member.automation.policyId) : undefined,
   teamChanged: () => { emit({type: 'teams', teams: teamStore.listTeams(), agents: agents.list()}); },
+});
+const automaticTeams = new AutomaticTeamCreator(paths.profileRoot, agents, policies, teamStore, {
+  async catalogs(input) {
+    assertIdle(); const revision = configurationRevision();
+    const members = input.memberAgentIds.map(id => agents.get(id));
+    if (input.workspacePath && !selectedWorkspaces.has(input.workspacePath)) throw new Error('폴더 선택 버튼으로 자동 대표의 작업 폴더를 선택하세요.');
+    if (input.workspacePath) normalizeWorkspace(input.workspacePath);
+    const apis = settings.getApiProviderProfiles().filter(p => p.capabilities.tools && verifiedProfiles.has(p.id) && secrets.has(apiProfileSecretKey(p)));
+    const loginCatalogs = await Promise.all((['codex', 'claude-code'] as const).map(async connectionId => {
+      try {if (!(await getProviderAuthStatus(connectionId)).authenticated) return; return {connectionId, models: (await listProviderModels(connectionId)).models};} catch {return;}
+    }));
+    const catalogs = [...loginCatalogs.filter((item): item is NonNullable<typeof item> => !!item), ...apis.map(p => ({connectionId: p.id, models: [{id: p.model, label: p.model, isDefault: true, efforts: []}]}))];
+    // Recheck login after catalog discovery; a disconnected provider must not be saved as a working leader.
+    const stillConnected = await Promise.all(catalogs.map(async c => c.connectionId !== 'codex' && c.connectionId !== 'claude-code' || (await getProviderAuthStatus(c.connectionId)).authenticated));
+    if (stillConnected.some(value => !value)) throw new Error('모델 확인 중 로그인이 해제되었습니다. 연결을 확인하고 다시 시도하세요.');
+    return {catalogs, assertCurrent() {
+      assertIdle(); assertConfigurationCurrent(revision);
+      if (members.some(member => JSON.stringify(agents.get(member.id)) !== JSON.stringify(member))) throw new Error('모델 확인 중 초기 멤버 설정이 변경되었습니다. 다시 확인하세요.');
+      if (apis.some(p => !verifiedProfiles.has(p.id) || !secrets.has(apiProfileSecretKey(p)))) throw new Error('모델 확인 중 API 연결 상태가 변경되었습니다. 다시 확인하세요.');
+      if (input.workspacePath) normalizeWorkspace(input.workspacePath);
+    }};
+  }, createAvatar: id => avatars.save(randomDefaultAvatarScene(), id).id,
+  changed() {emit({type: 'policies', policies: policies.list()}); emit({type: 'teams', teams: teamStore.listTeams(), agents: agents.list()});},
 });
 const rendererPath = join(app.getAppPath(), 'renderer', 'index.html');
 const rendererUrl = pathToFileURL(rendererPath).href;
@@ -615,6 +640,7 @@ async function request(method: string, raw: unknown): Promise<unknown> {
   if (updatePending && !updateReadOnly.has(method)) throw new Error('업데이트를 준비하고 있습니다. 완료될 때까지 작업과 설정 변경을 기다려 주세요.');
   if (credentialMutation && !['state', 'authStatus', 'getTeamRun', 'getAgentAvatar', 'exportSession', 'exportTeamRun', 'exportRabbitRun', 'cancel', 'cancelTeamRun', 'cancelAgentAvatar'].includes(method)) throw new Error('API 키를 안전하게 저장하고 있습니다. 완료 후 다시 시도하세요.');
   if ((quitPending || quitting) && !['state', 'authStatus', 'exportSession', 'exportTeamRun', 'exportRabbitRun', 'getTeamRun', 'cancel', 'cancelTeamRun', 'cancelAgentAvatar'].includes(method)) throw new Error('종료 처리를 확인하고 있습니다. 앱으로 돌아온 뒤 다시 시도하세요.');
+  if (!['state', 'exportSession', 'exportTeamRun', 'getTeamRun', 'getAgentAvatar'].includes(method)) automaticTeams.assertReady();
   const args = raw == null ? {} : object(raw);
   switch (method) {
     case 'state': return state();
@@ -788,7 +814,7 @@ async function request(method: string, raw: unknown): Promise<unknown> {
     case 'cloneTeam': {
       const original = teamStore.getTeam(string(args.id));
       if (args.expectedUpdatedAt !== undefined && args.expectedUpdatedAt !== original.updatedAt) throw new Error('팀 설정이 변경되었습니다. 최신 설정을 다시 불러오세요.');
-      const {id: _id, createdAt: _created, updatedAt: _updated, ...configuration} = original;
+      const {id: _id, createdAt: _created, updatedAt: _updated, creation: _creation, ...configuration} = original;
       const team = teamStore.saveTeam({...configuration, name: `${original.name.slice(0, 73)}의 복제본`}); return {state: state(), team};
     }
     case 'getAgentAvatar': return readAvatar(string(args.id, 100));
@@ -799,7 +825,11 @@ async function request(method: string, raw: unknown): Promise<unknown> {
       for (const job of avatarJobs.active()) if (job.ownerKey === `agent:${id}`) cancelAvatarRequest(job.requestId);
       agents.remove(id); return state();
     }
+    case 'cancelAutomaticTeamCreation': return {cancelled: automaticTeams.cancel(string(args.requestId, 100))};
     case 'saveTeam': {
+      const submitted = object(args.team);
+      if (submitted.leaderMode === 'automatic') {await automaticTeams.create(submitted); return state();}
+      if (submitted.leaderMode !== undefined && submitted.leaderMode !== 'existing') throw new Error('대표 생성 방식을 확인하세요.');
       const data = object(args.team), id = data.id == null || data.id === '' ? undefined : string(data.id);
       if (id && string(args.expectedUpdatedAt ?? data.updatedAt ?? '', 40) !== teamStore.getTeam(id).updatedAt) throw new Error('팀 설정이 변경되었습니다. 최신 팀 설정을 다시 불러온 뒤 저장하세요.');
       if (!Array.isArray(data.memberAgentIds) || data.memberAgentIds.length < 1) throw new Error('등록된 에이전트 중 대표를 포함해 팀 멤버를 선택하세요.');

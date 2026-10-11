@@ -1,4 +1,4 @@
-import {lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync} from 'node:fs';
+import {existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, unlinkSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {atomicWriteJson} from './local-store.js';
@@ -117,8 +117,9 @@ export class AvatarStore {
     if (typeof id !== 'string' || !UUID.test(id)) throw new Error('프로필 이미지 ID가 올바르지 않습니다.');
     this.ensureDirectory(); return join(this.directory, `${id}.json`);
   }
-  save(scene: AvatarScene): AgentAvatar {
-    const id = randomUUID(), createdAt = new Date().toISOString(), validated = validateAvatarScene(scene);
+  save(scene: AvatarScene, id: string = randomUUID()): AgentAvatar {
+    if (existsSync(this.file(id))) throw new Error('Avatar identity already exists.');
+    const createdAt = new Date().toISOString(), validated = validateAvatarScene(scene);
     const record = {version: 1, id, createdAt, scene: validated};
     this.assertCapacity(record);
     atomicWriteJson(this.file(id), record);

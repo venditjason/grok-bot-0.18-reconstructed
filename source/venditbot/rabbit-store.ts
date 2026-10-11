@@ -11,6 +11,9 @@ export type RabbitRunRecord = {
   request: RabbitRunInput; idempotencyKey: string;
   phase: 'prepared' | 'submitting' | 'accepted' | 'unknown' | 'rejected';
   createdAt: string; updatedAt: string; attempts: number; source?: RabbitRunSource;
+  /** A previous POST may have committed. A rejected later attempt is not proof
+   * that the original work did not start; only its validated receipt clears this. */
+  unresolvedSubmission?: true;
   receipt?: RabbitRunReceipt; detail?: RabbitRunDetail; events?: RabbitEventPage; error?: string;
 };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
@@ -25,10 +28,13 @@ const binding = (connection: RabbitConnection) => JSON.stringify([connection.bas
 function normalizeRecord(value: unknown): RabbitRunRecord {
   const input = object(value), connectionSnapshot = normalizeRabbitConnection(input.connectionSnapshot), id = identity(input.id), connectionId = identity(input.connectionId);
   if (connectionId !== connectionSnapshot.id || !['prepared','submitting','accepted','unknown','rejected'].includes(String(input.phase)) || !Number.isInteger(input.attempts) || Number(input.attempts) < 0 || Number(input.attempts) > 1000) throw new Error('프로젝트 API 실행 기록이 올바르지 않습니다.');
+  if (input.unresolvedSubmission !== undefined && input.unresolvedSubmission !== true) throw new Error('프로젝트 API 미확인 접수 기록이 올바르지 않습니다.');
   const result: RabbitRunRecord = {id, connectionId, connectionSnapshot, request: normalizeRabbitRunInput(input.request, connectionSnapshot), idempotencyKey: identity(input.idempotencyKey),
     phase: input.phase as RabbitRunRecord['phase'], createdAt: date(input.createdAt), updatedAt: date(input.updatedAt), attempts: Number(input.attempts), ...(input.source === undefined ? {} : {source: source(input.source)}),
-    ...(input.error === undefined ? {} : {error: bounded(input.error, 800)})};
+    ...(input.error === undefined ? {} : {error: bounded(input.error, 800)}),
+    ...(input.unresolvedSubmission === true || input.phase === 'unknown' ? {unresolvedSubmission: true as const} : {})};
   if (input.receipt !== undefined) result.receipt = normalizeRabbitRunReceipt(input.receipt, connectionSnapshot);
+  if (result.receipt && result.unresolvedSubmission) throw new Error('프로젝트 API 접수증과 미확인 상태가 일치하지 않습니다.');
   if (result.phase === 'accepted' && !result.receipt) throw new Error('접수된 프로젝트 API 기록에 접수증이 없습니다.');
   if (input.detail !== undefined || input.events !== undefined) {
     if (!result.receipt) throw new Error('프로젝트 API 조회 결과에 연결된 접수증이 없습니다.');
@@ -78,7 +84,7 @@ export class RabbitStore {
       this.runs = data.runs.map(normalizeRecord);
       if (new Set(this.runs.map(item => item.id)).size !== this.runs.length || new Set(this.runs.map(item => item.idempotencyKey)).size !== this.runs.length) throw new Error('프로젝트 API 실행 ID가 중복되었습니다.');
       if (this.runs.some(run => ['prepared','submitting'].includes(run.phase))) this.persistRuns(this.runs.map(run => ['prepared','submitting'].includes(run.phase)
-        ? {...run, phase: 'unknown', updatedAt: stamp(run.updatedAt), error: '앱 종료로 접수 결과를 확인하지 못했습니다. 같은 요청으로 재확인하세요. 원격 작업은 자동 취소되지 않습니다.'} : run));
+        ? {...run, phase: 'unknown', unresolvedSubmission: true, updatedAt: stamp(run.updatedAt), error: '앱 종료로 접수 결과를 확인하지 못했습니다. 같은 요청으로 재확인하세요. 원격 작업은 자동 취소되지 않습니다.'} : run));
     }
   }
   private checkRoot(): void {const stat = lstatSync(this.root); if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) throw new Error('프로젝트 API 저장 폴더가 안전하지 않습니다.');}
@@ -126,12 +132,14 @@ export class RabbitStore {
   completeSubmission(id: string, value: unknown): RabbitRunRecord {
     const run = this.getRun(id); if (run.phase !== 'submitting') throw new Error('이미 종료되거나 변경된 프로젝트 접수 요청입니다.');
     const receipt = normalizeRabbitRunReceipt(value, run.connectionSnapshot);
-    delete run.error;
+    delete run.error; delete run.unresolvedSubmission;
     return this.replace({...run, phase: 'accepted', receipt});
   }
   failSubmission(id: string, failure: {uncertain: boolean; error: string}): RabbitRunRecord {
     const run = this.getRun(id); if (run.receipt) return run;
-    return this.replace({...run, phase: failure.uncertain ? 'unknown' : 'rejected', error: bounded(failure.error, 800)});
+    const unresolved = failure.uncertain || run.unresolvedSubmission === true || run.phase === 'unknown';
+    return this.replace({...run, phase: unresolved ? 'unknown' : 'rejected',
+      ...(unresolved ? {unresolvedSubmission: true as const} : {}), error: bounded(failure.error, 800)});
   }
   saveObservation(id: string, value: unknown, events?: unknown): RabbitRunRecord {
     const run = this.getRun(id); if (!run.receipt) throw new Error('접수증을 먼저 확인하세요.');

@@ -300,3 +300,35 @@ test('sidebar cards render one native button per profile without a separate menu
     assert.match(html, /<button type="button" draggable="false" class="(?:agent|team)-photo-tile sidebar-profile-button/); assert.match(html, /aria-description="카드를 드래그하여 같은 목록/); assert.doesNotMatch(html, /sidebar-drag-handle|agent-menu-trigger|···/);
   }
 });
+
+test('automatic representative mode needs a project brief, permits zero initial members and exposes the security boundary', () => {
+  let draft = {name: '예약 앱 팀', instructions: '', memberAgentIds: [], rounds: 1};
+  const getTree = () => treeElements(TeamEditor({draft, agents: [], onChange: next => {draft = next;}, onSave: noop, onCancel: noop, onSelectWorkspace: noop}));
+  getTree().find(item => item.props['aria-label'] === '대표 구성 방식').props.onChange({target: {value: 'automatic'}});
+  assert.equal(draft.leaderMode, 'automatic'); assert.equal(draft.autonomous, true); assert.match(draft.requestId, /^[a-f0-9-]{36}$/);
+  assert.equal(buttonNamed(getTree(), '대표와 팀 함께 만들기').props.disabled, true);
+  getTree().find(item => item.props['aria-label'] === '자동 대표 프로젝트 내용').props.onChange({target: {value: '모바일 예약 앱을 구현하고 테스트한다.'}});
+  assert.equal(buttonNamed(getTree(), '대표와 팀 함께 만들기').props.disabled, false);
+  assert.equal(getTree().some(item => item.props['aria-label'] === '팀 대표'), false);
+  const html = renderToStaticMarkup(React.createElement(TeamEditor, {draft, agents: [], onChange: noop, onSave: noop, onCancel: noop}));
+  assert.match(html, /예약 앱 팀 대표/); assert.match(html, /관리자 보안·승인 규칙은 변경할 수 없습니다/); assert.match(html, /추가 AI 호출 없이/);
+  const id = draft.requestId;
+  getTree().find(item => item.props['aria-label'] === '대표 구성 방식').props.onChange({target: {value: 'existing'}});
+  assert.equal(draft.requestId, id); assert.equal(buttonNamed(getTree(), '팀 저장').props.disabled, true);
+});
+
+
+test('automatic representative save locks all draft edits but leaves cancellation available', () => {
+  const draft = { name: 'Project', instructions: '', policies: '', projectBrief: 'Deliver the project', leaderMode: 'automatic', requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', leaderAgentId: 'planner', memberAgentIds: ['planner'], rounds: 1 };
+  let edits = 0, cancelled = 0;
+  const tree = treeElements(TeamEditor({draft, agents, busy: true, onChange: () => edits++, onSave: noop, onCancel: () => cancelled++, onSelectWorkspace: noop}));
+  const fields = tree.filter(item => item.props.onChange && ('value' in item.props));
+  assert.ok(fields.length >= 6);
+  for (const field of fields) { assert.equal(field.props.disabled, true); field.props.onChange({target: {value: 'mutated'}}); }
+  assert.equal(edits, 0);
+  assert.equal(tree.some(item => item.props.kind === 'vendit' && item.props.children === '대표'), false);
+  const cancel = tree.find(item => item.props.onPress && item.props.children === '취소');
+  assert.equal(cancel.props.disabled, undefined); cancel.props.onPress(); assert.equal(cancelled, 1);
+  const manual = treeElements(TeamEditor({draft: {...draft, leaderMode: 'existing'}, agents, onChange: noop, onSave: noop, onCancel: noop}));
+  assert.equal(manual.some(item => item.props.kind === 'vendit' && item.props.children === '대표'), true);
+});

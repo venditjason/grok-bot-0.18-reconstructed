@@ -46,10 +46,11 @@ export function teamEditDrafts(value: unknown): Record<string, TeamEditDraft> | 
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
-    if (!string(d.name, 80) || !string(d.instructions, 16000) || !optional(d.id, 100) || !optional(d.topic, 4000) || !optional(d.policies, 16000) || !optional(d.leaderAgentId, 100) || (d.autonomous !== undefined && typeof d.autonomous !== 'boolean') || !Array.isArray(d.memberAgentIds) || d.memberAgentIds.some(id => !string(id, 100)) || !string(record.expectedUpdatedAt, 40)) return;
+    if (!string(d.name, 80) || !string(d.instructions, 16000) || !optional(d.id, 100) || !optional(d.topic, 4000) || !optional(d.policies, 16000) || !optional(d.leaderAgentId, 100) || !optional(d.projectBrief, 4000) || !optional(d.workspacePath, 4096) || !optional(d.requestId, 100) || (d.leaderMode !== undefined && d.leaderMode !== 'existing' && d.leaderMode !== 'automatic') || (d.autonomous !== undefined && typeof d.autonomous !== 'boolean') || !Array.isArray(d.memberAgentIds) || d.memberAgentIds.some(id => !string(id, 100)) || !string(record.expectedUpdatedAt, 40)) return;
     const draft: TeamDraft = { name: d.name, instructions: d.instructions, memberAgentIds: [...d.memberAgentIds] as string[], rounds: 1 };
     if (typeof d.autonomous === 'boolean') draft.autonomous = d.autonomous;
-    for (const field of ['id', 'topic', 'policies', 'leaderAgentId'] as const) if (typeof d[field] === 'string') draft[field] = d[field];
+    if (d.leaderMode === 'existing' || d.leaderMode === 'automatic') draft.leaderMode = d.leaderMode;
+    for (const field of ['id', 'topic', 'policies', 'leaderAgentId', 'projectBrief', 'workspacePath', 'requestId'] as const) if (typeof d[field] === 'string') draft[field] = d[field];
     result[key] = { draft, expectedUpdatedAt: record.expectedUpdatedAt };
   }
   return result;

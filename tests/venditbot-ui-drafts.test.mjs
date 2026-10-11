@@ -88,3 +88,11 @@ test('failed or stale explicit recovery cannot replace the damaged original', ()
   disk.setItem = () => { throw new Error('quota'); }; assert.equal(store.preserveOriginal(), false); assert.equal(disk.getItem(key), original); assert.deepEqual(store.original, { text: original, preserved: false });
   disk.setItem = write; disk.setItem(key, 'another original'); assert.equal(store.preserveOriginal(), false); assert.equal(disk.getItem(key), 'another original');
 });
+
+test('automatic representative drafts preserve project text, request identity and workspace across restart', () => {
+  const draft = {name: '예약 팀', instructions: '검증', projectBrief: '예약 앱 프로젝트', policies: '팀 지침', leaderMode: 'automatic', requestId: '12345678-1234-4123-8123-123456789012', workspacePath: '/chosen/workspace', memberAgentIds: [], rounds: 1, autonomous: true};
+  const disk = storage(), store = new LocalDraftStore(disk, 'team-edits', {}, teamEditDrafts);
+  store.set({new: {draft, expectedUpdatedAt: ''}});
+  assert.deepEqual(new LocalDraftStore(disk, 'team-edits', {}, teamEditDrafts).value.new.draft, draft);
+  assert.equal(teamEditDrafts({new: {draft: {...draft, leaderMode: 'forged'}, expectedUpdatedAt: ''}}), undefined);
+});
