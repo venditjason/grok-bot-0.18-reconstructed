@@ -1,0 +1,14 @@
+{
+  "originalBundleSha256": "fa12c2f2019114129a4d02e389d7e9b4d6f81b70ef9a61de0c9da4827388f7c3",
+  "description": "Generated from the original user-supplied VDS 2.11.0 bundle before its embedded Lodash replacement, using tests/helpers/venditbot-vds-render.mjs (fixed random IDs and React 19.2.1 SSR).",
+  "renderHashes": {
+    "primaryButton": "140ca004e7591e4bc6ca94d5bb83e488062a82a4254da378180c9d40af45cb37",
+    "disabledButton": "2487fd127ad93e655840da496d85dd210b3675ec69fee2a8a4690a8169e34d3c",
+    "textInput": "eb533069ed0b565fd70cf254283ea35a9bb230892f716b8d01e0bc77252dc4ea",
+    "textArea": "a9e4fbfc90aabecc3b624e9d2949634e7d3096286decdcb5f5ea9ffc7c245ca6",
+    "checkbox": "1c718f3528939d405055a9039577d38ccf63b6551a8f8c427abdcf659e0235bb",
+    "badge": "7bfd9b43f05f129df0f92db13b9ec8a01b710d4254f7065ac42c6d905b4e8077"
+  },
+  "semanticColorTreeSha256": "49be89f41734006cf90fdbb48c29e84e30f7ba4a2bbfd1b708cbbf484f4ba43d",
+  "exportedNamesSha256": "895cc44c9f7ff93ab9a943f40566c886ab4085c988030ab9e268d353f8e4411a"
+}

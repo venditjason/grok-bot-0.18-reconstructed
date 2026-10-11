@@ -43,7 +43,6 @@ test("Router settings use the trusted backend and display recorded inference usa
   const cursorSession = await readFile(path.join(repoRoot, "source", "host", "extensions", "inference", "cursor-session.ts"), "utf8");
   const cursorBackend = await readFile(path.join(repoRoot, "source", "shared", "node", "cursor-backend", "cursor-inference.ts"), "utf8");
   const providers = await readFile(path.join(repoRoot, "source", "host", "extensions", "inference", "provider-session.ts"), "utf8");
-  const codexDirect = await readFile(path.join(repoRoot, "source", "host", "extensions", "inference", "codex-direct-responses.ts"), "utf8");
   const turnShell = await readFile(path.join(repoRoot, "source", "host", "runner", "turn-run-shell.ts"), "utf8");
   const coordinator = await readFile(path.join(repoRoot, "source", "node-agent-coordinator", "inference-router.ts"), "utf8");
   const coordinatorMain = await readFile(path.join(repoRoot, "source", "node-agent-coordinator", "main.ts"), "utf8");
@@ -71,10 +70,10 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(mainEdge, /invoke\(deps\.settingsStore, "setInferenceProvider", provider\)/);
   assert.match(mainEdge, /return \{ provider, usage:/);
   assert.match(mainEdge, /invoke\(deps\.boxRecovery, "restartCoordinator"\)/);
-  assert.match(mainEdge, /mode === "local-docker"\) await startLocalDockerBox\(settingsPath\); else await stopLocalDockerBox\(\)/);
+  assert.match(mainEdge, /mode === "local-docker"\) await startLocalDockerBox\(settingsPath\); else await stopLocalDockerBox\(settingsPath\)/, "stop must receive the same profile settings path used to start its owned VM");
   assert.match(mainEdge, /setBoxRuntime", mode === "local-docker" \? "remote" : "local-docker"/);
   assert.match(localDocker, /public\.ecr\.aws\/k0i0n2g5\/cursorenvironments\/universal:sand-box-latest/);
-  assert.match(localDocker, /"127\.0\.0\.1:1340:1340"/);
+  assert.doesNotMatch(localDocker, /"127\.0\.0\.1:(?:1337|1339|1340|6080|6081|8790):/, "published ports must be dynamically allocated; ownership and mapped-port behavior are tested in venditbot-isolation.test.mjs");
   assert.match(localDocker, /SAND_BOX_AUTO_UPDATE=0/);
   assert.match(localDocker, /dst=\/home\/box\/sand-host\/host-main\.cjs,readonly/);
   assert.match(localDocker, /\.getBoxRuntime\(\) === "local-docker" \? await localConnect\(\) : await remote\.connect\(\)/);
@@ -82,21 +81,17 @@ test("Router settings use the trusted backend and display recorded inference usa
   assert.match(inference, /routerSettings\.getInferenceProvider\(\)/);
   assert.match(inference, /typeof extendedUsage\.then === "function"/);
   assert.match(inference, /createProviderPromptSession\(provider\)/);
-  assert.match(providers, /https:\/\/chatgpt\.com\/backend-api\/codex/);
-  assert.match(providers, /headers\.set\("ChatGPT-Account-Id", credentials\.accountId\)/);
-  assert.match(providers, /streamCodexDirectResponses/);
-  assert.doesNotMatch(providers, /provider\.responses\(configuredCodexModel\(\)\)/);
-  assert.match(codexDirect, /store: false/);
-  assert.match(codexDirect, /response\.output_text\.delta/);
-  assert.match(codexDirect, /type: "function_call_output"/);
-  assert.match(providers, /parameters: jsonSchema\(parameters\)/);
-  assert.match(providers, /You are Grok Bot, a warm, concise desktop assistant/);
-  assert.match(providers, /mcpServers: \{ grok_bot_plugins:/);
+  // Keep this legacy packaging guard at the dispatch boundary. Mock-process
+  // lifecycle, official protocol, cancellation and isolation behavior live in
+  // provider-auth-runtime.test.mjs and claude-cli-session.test.mjs.
+  assert.match(providers, /from "\.\.\/\.\.\/\.\.\/shared\/node\/provider-auth-runtime\.js"/);
+  assert.match(providers, /runCodexTurn\(\{/);
+  assert.match(providers, /runClaudeTurn\(\{/);
+  assert.doesNotMatch(providers, /backend-api\/codex|ChatGPT-Account-Id|streamCodexDirectResponses/);
+  assert.doesNotMatch(providers, /auth\.json|refresh_token|access_token|id_token|jwtDecode|\.codex["']/);
+  assert.doesNotMatch(providers, /process\.env\.(?:OPENAI|ANTHROPIC|OPENROUTER|CODEX)_/);
   assert.match(providers, /recordRoutedUsage\(provider, usage\)/);
-  assert.match(providers, /queryClaude/);
-  assert.match(providers, /tools: mcpServerUrl == null \? \[\] : \["mcp__grok_bot_plugins__\*"\]/);
-  assert.match(providers, /https:\/\/openrouter\.ai\/api\/v1/);
-  assert.match(providers, /OpenRouter needs OPENROUTER_API_KEY/);
+  assert.match(providers, /createApiProviderExecutor\(\{ profile: options\.apiProfile, apiKey: options\.apiKey/);
   assert.match(cursorSession, /routedProvider !== "cursor"/);
   assert.match(cursorSession, /createProviderPromptSession\(routedProvider\)/);
   assert.match(cursorBackend, /routedProvider !== "cursor"/);

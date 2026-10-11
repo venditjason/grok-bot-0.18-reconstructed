@@ -1,226 +1,91 @@
-# Grok Bot 0.18 — reconstructed and extended
+# 벤디트봇 · VenditBot
 
-![Grok Bot Router settings with Codex selected and local usage totals](docs/assets/router-settings.png)
+본인 Mac에서 Claude, Codex, 모델 API를 연결해 대화하고 파일 작업을 수행하는 개인용 데스크톱 앱입니다. 에이전트마다 이름·역할 지시문·작업 폴더와 최대 8개의 AI 연결 우선순위를 저장하고, 회사형 팀의 대표가 팀원을 구성하고 일을 위임하며, AI 프로필 그림을 생성할 수 있습니다. 모든 실행은 하나의 대기열을 공유합니다.
 
-This repository is an unofficial, source-oriented reconstruction of the
-publicly shipped Grok Bot 0.18.0 macOS app.
+현재 제품은 독립 Electron 앱입니다. 기존 grokbot의 계정이나 원본 renderer 없이 실행하며, 기존 앱·전역 CLI의 로그인 정보를 자동으로 가져오지 않습니다. 출발점이 된 Grok Bot 0.18 재구성 프로젝트의 README는 [원문 보존 문서](docs/UPSTREAM_RECONSTRUCTION.md)에 있습니다.
 
-The project began as an attempt to understand how the desktop app was put
-together. It now contains readable TypeScript implementations of its Electron,
-host, coordinator, local-execution, protocol, and renderer boundaries, plus a
-deterministic toolchain for turning those sources back into a working macOS
-application.
+## 사용 흐름
 
-It also adds a few practical experiments:
+1. **설정 → 연결**에서 Claude 또는 Codex의 공식 로그인을 시작하거나 API 연결을 등록합니다.
+2. Claude·Codex 로그인 후 공식 런타임이 반환한 모델과 해당 모델의 추론 강도를 선택합니다. 로그인 전에는 모델 설정 폼을 표시하지 않습니다. API 연결은 공급자가 제공한 정확한 모델 ID를 입력합니다.
+3. 일반 대화를 시작하거나 **에이전트**에 이름·역할 지시문과 연결 우선순위를 저장합니다. 각 연결의 모델·추론 강도를 선택하고, 파일 작업이 필요하면 네이티브 폴더 선택기로 작업 폴더를 지정합니다.
+4. 에이전트나 팀을 클릭하면 대화를 시작합니다. 설정은 대화 상단에서 엽니다. **팀**에는 주제·대표·멤버·운영 정책을 저장하며 대표 혼자 시작해 사용자 템플릿으로 팀원을 추가할 수도 있습니다.
+5. 에이전트 설정에서 프로필 그림을 만듭니다. 모든 연결의 **일러스트** 모드와 Codex의 **AI 이미지** 모드를 구분합니다.
+6. 작업은 한 번에 하나씩 실행하며 최대 16개가 대기합니다. 실행 중이거나 대기 중인 작업을 개별 취소할 수 있습니다.
+7. 파일 쓰기는 변경할 전체 내용을 확인하고 승인해야 실행됩니다. 대화는 로컬에 저장하며 JSON·Markdown으로 내보낼 수 있습니다.
 
-- an inference router for Cursor, Claude Code, Codex, and OpenRouter;
-- Grok Bot plugin/MCP tools across the routed providers;
-- local usage tracking for routed inference;
-- an optional local Docker sandbox in place of the remote box; and
-- a reconstructed settings surface integrated into the polished shipped UI.
+작업을 만들 때 에이전트 설정과 연결 우선순위의 복사본을 저장합니다. 이후 에이전트를 수정하거나 삭제해도 기존 작업은 바뀌지 않습니다. 로그인 성공, 모델 목록 조회, 실제 응답 성공은 서로 다른 상태로 표시합니다.
 
-This is a hacking and research project, not Anysphere's original monorepo and
-not an official Grok Bot release. Names and module boundaries inferred from a
-compiled application may differ from the original source.
+각 요청은 첫 순위부터 시작합니다. 응답 텍스트나 도구 실행이 시작되기 전에 인증·한도·연결 오류가 발생하면 저장한 다음 연결을 시도하며, 시도별 결과와 실제 응답한 연결을 표시합니다. 부분 응답, 도구 실행, 사용자 취소, 로컬 저장 오류가 발생하면 자동 전환을 멈춥니다. 선택한 연결별 구독 한도와 API 요금이 적용됩니다.
 
-## What is in the repository?
+여러 연결을 사용하는 작업이 새 Claude 세션으로 전환되면 완료된 대화와 도구 결과를 구조화된 문맥으로 전달합니다. 이는 기존 Claude 세션을 그대로 옮기는 기능이 아니며, 이미 수행한 파일 작업을 자동 재실행하지 않습니다. 문맥 크기 제한을 넘으면 내용을 잘라 보내지 않고 오류로 안내합니다.
 
-The checked-in tree contains the reviewed reconstruction, tests, manifests,
-build scripts, and Git LFS preservation copies of the original macOS arm64 and
-Windows x64 installers. It deliberately does **not** commit the extracted
-upstream application, build output, local credentials, or the large forensic
-recovery workspace.
+## 현재 지원 범위
 
-The public Grok Bot 0.18.0 application is instead treated as a pinned build
-input. During bootstrap, the toolchain downloads it, verifies its SHA-256
-identity, and extracts the pieces required to assemble the reconstruction.
-
-The resulting app is a hybrid by design:
-
-- application runtimes are compiled from the readable sources under `source/`;
-- the polished shipped renderer remains the UI baseline;
-- a narrow deterministic transform adds the reconstructed Router settings UI;
-- original and patched renderer chunk hashes are recorded and verified; and
-- the finished app uses a separate bundle identifier and an ad-hoc signature.
-
-The upstream app installed on the machine is never overwritten.
-
-### Why retain the shipped renderer?
-
-The distributed application did not include the original frontend source or
-source maps. It contained optimized, minified production JavaScript and CSS
-chunks: enough to inspect behavior and recover contracts, but not the authored
-React components, names, comments, file structure, or design-system source.
-
-Recreating the complete frontend with the same polish and behavior would have
-been a separate, much larger reverse-engineering project. It was not a realistic
-goal for a weekend build. The practical choice was therefore to reconstruct the
-runtime and control-plane code, retain the checksum-pinned shipped renderer,
-and make the smallest auditable UI patch needed for the new Router settings.
-
-`frontend/` is a readable partial reconstruction and design workspace. It is
-useful for understanding UI contracts and experimenting with clean components,
-but it should not be mistaken for Anysphere's missing original frontend source
-or a pixel-perfect replacement for the packaged renderer.
-
-## Preserved original installers
-
-Research copies of the exact 0.18.0 installers live under
-`research-archives/original/0.18.0/` and are stored with Git LFS:
-
-| Platform | File | SHA-256 |
+| 연결 | 실행 경로 | 모델 설정 |
 | --- | --- | --- |
-| macOS arm64 | `macos-arm64/Grok_Bot_0.18.0.dmg` | `a253ccd8aab01e083f9812a0264354c5034d8ba7f0610bbb557e82ae77d203eb` |
-| Windows x64 | `windows-x64/Grok_Bot_0.18.0_Setup.exe` | `464079a15ef5fa8b61ccea8fffcc78f63cfcf6df65fb0ad5e725d8b95f7e437e` |
+| Codex | 앱 전용 공식 CLI app-server | 공식 model/list와 모델별 reasoning effort |
+| Claude | 앱 전용 공식 CLI stream-json | 공식 초기화 응답의 모델·해석된 ID·지원 effort |
+| OpenAI | Responses 또는 Chat Completions | API 프로필의 모델 ID |
+| Anthropic | Messages | API 프로필의 모델 ID |
+| OpenRouter | Chat Completions | API 프로필의 모델 ID |
+| OpenAI 호환 | 명시적으로 선택한 Responses 또는 Chat Completions | 지정 endpoint의 모델 ID |
 
-See [research-archives/README.md](research-archives/README.md) for source URLs,
-sizes, verification commands, and the machine-readable artifact manifest.
+파일 도구는 선택한 폴더 안의 목록·읽기·검색·쓰기 4개입니다. 팀 대화에서는 별도로 같은 팀의 메시지·작업 결과를 읽고 전달하며, 대표에게만 위임·멤버 구성·정책 변경 도구를 제공합니다. Codex, API, Claude의 인증된 로컬 MCP가 같은 파일 접근 검사와 쓰기 승인 절차를 사용합니다. 현재 제품은 임의 shell, 제3자 MCP 서버 등록, 기존 Grok 플러그인, 화면 제어, Docker 실행 기능을 제공하지 않습니다.
 
-## Current features
+## 회사형 팀과 프로필 그림
 
-### Inference Router
+팀은 대표 한 명부터 시작할 수 있으며, 구성원 수에는 고정 제한이 없습니다. **대표 자율주행**을 켜면 대표가 업무에 필요한 에이전트를 생성합니다. 대표는 목표를 직접 처리하거나 적합한 팀원에게 위임합니다. 위임은 예약 확인을 반환한 뒤 현재 대표 응답이 끝나면 실행하고, 결과를 대표의 다음 계획에 전달합니다. 팀원 연결이 실패해도 실패 원인을 대표에게 돌려줘 다른 팀원에게 재배분하거나 한계를 보고할 수 있습니다. 도구 미지원 API에서는 대표가 직접 답변하며 위임 제한을 표시합니다.
 
-Open **Settings → Router** to choose the backend used for new turns:
+대표는 등록된 에이전트의 설정을 복제할 수 있고, 자율주행 팀에서는 템플릿 지정 없이 대표의 실행 시작 시점 연결·모델·effort·폴더를 상속한 팀원을 생성할 수 있습니다. 대표에게 에이전트 영구 삭제 도구는 제공하지 않습니다. 팀에서 제외해도 에이전트와 과거 기록은 남으며, 영구 삭제는 관리자 UI에서만 처리합니다. 변경은 팀 대화에 기록하며 이미 수행한 작업의 설정은 보존합니다. 동시에 진행할 팀은 4개, 저장 팀은 50개, 팀 작업 기록은 200개입니다. 위임·메시지 수용량은 실제 구성원 수에 따라 늘어납니다. 대표 계획은 3회와 필요시 최종 종합 1회이며, 동시 실행·저장 용량 보호는 유지합니다. 팀 단계도 일반 대기열 뒤에 들어가므로 다른 사용자 작업을 막지 않습니다.
 
-| Provider | Authentication | Tool support |
-| --- | --- | --- |
-| Cursor | Existing Grok Bot/Cursor session | Native Grok Bot tools and plugins |
-| Claude Code | Existing Claude Code login | Routed Grok Bot MCP tools |
-| Codex | Existing local ChatGPT/Codex login | Direct Responses transport with Grok Bot tools |
-| OpenRouter | API key saved through the desktop secrets bridge | Grok Bot tool-execution loop |
+대표는 팀원의 기존 연결 안에서 작업별 모델과 추론 강도를 선택할 수 있습니다. 실제 로그인된 모델 목록을 먼저 확인하며 단순·반복 업무는 지원되는 Claude Sonnet 5.5 low, 없으면 GPT-6 Luna low를 선호합니다. 둘 다 사용할 수 없으면 기존 연결 순서를 유지하고 안내합니다. 작업별 선택은 해당 작업에 저장하며 에이전트의 기본 설정이나 이전 작업을 바꾸지 않습니다. 이는 비용 선호 정책이며 특정 가격·사용 권한이나 상시 감시 일정을 보장하지 않습니다.
 
-Cursor is the default. Claude Code and Codex do not require separate API keys
-when their local clients are already authenticated. The application preserves
-streaming responses, thinking state, reactions, rich plugin mentions, and MCP
-tool execution across routed conversations.
+진행 중 팀 대화에 보낸 메시지는 후속 단계가 읽습니다. 완료 후 후속 지시는 같은 팀의 최근 완료 3회에서 목표·대표 결과·당시 정책을 최대 32,000자의 인용 문맥으로 이어받습니다. 긴 내용은 발췌 사실을 표시하며 과거 도구 작업을 재실행하지 않습니다. 팀 메시지 한도는 기본 200개에서 구성원 수에 따라 늘어나며 메시지당 8,000자입니다.  긴 원본 결과는 개별 작업에서 읽거나 팀 JSON과 함께 내보냅니다.
 
-**Usage & Billing** shows the locally recorded request and token totals for
-providers that return usage data. These figures are activity records, not an
-authoritative provider invoice.
+새 에이전트와 대표가 생성한 팀원에는 외부 AI 요청 없이 서로 다른 기본 프로필 그림을 자동으로 부여합니다. 사이드바는 프로필 그림을 중심으로 표시하며 사용자가 선택한 그림과 명시적인 제거는 존중합니다. 기존 그림 없는 데이터는 읽는 것만으로 변경하지 않습니다.
 
-### Local Docker sandbox
+일러스트 모드는 모델의 제한된 도형 JSON을 안전한 SVG로 만듭니다. Codex AI 이미지 모드는 공식 런타임의 이미지 생성 결과만 받아 가운데를 잘라 512×512 PNG로 저장합니다. 파일·웹 이미지를 임의로 가져오지 않습니다. 생성은 요청당 한 장이며 공급자 사용량이 발생합니다. 생성 중 취소할 수 있고 내부 그림 작업은 일반 최근 대화에서 숨기되 저장 실패 시 복구할 수 있습니다.
 
-The Router page also has a **Use local Docker VM** toggle. When enabled, Grok
-Bot runs its box host and execution daemon in an owned local container instead
-of connecting to the remote sandbox.
+## 빌드와 실행
 
-The container:
-
-- is bound only to loopback ports;
-- mounts content-addressed host and daemon artifacts read-only;
-- reuses the user's existing provider authentication where needed;
-- is validated before the coordinator connects; and
-- is stopped or replaced through the same settings lifecycle.
-
-Docker Desktop, or another compatible local Docker daemon, must be running.
-Remote mode remains the default.
-
-## Requirements
-
-- macOS on Apple Silicon
-- Node.js 26.5.x
-- Xcode Command Line Tools
-- Git LFS
-- Docker Desktop (optional, only for the local sandbox)
-- local Claude Code or Codex authentication for those router choices
-
-## Quick start
+macOS arm64, Node.js 26.5.x, Xcode Command Line Tools가 필요합니다. 검증에 사용한 장비는 Apple M6·32GiB·macOS 27.0.1입니다. 의존성과 공식 런타임을 받는 동안 네트워크 연결이 필요합니다.
 
 ```sh
-git clone <your-repository-url>
-cd grok-bot-0.18-reconstructed
-git lfs install
-git lfs pull
-npm ci
+npm ci --ignore-scripts
 npm run bootstrap
 npm run check
-npm run package
-open "dist/Grok Bot 0.18 Reconstructed.app"
+npm run build
+npm run package:dev
+open "dist/벤디트봇 개발.app"
 ```
 
-`npm run bootstrap` first uses the Git LFS preservation copy of the pinned
-0.18.0 DMG. If that archive is absent, it falls back to the original public URL;
-`GROK_BOT_018_APP` can also point to an existing application copy. Bootstrap
-verifies both the DMG and `app.asar`, caches the matching Electron runtime, and
-hydrates the ignored `src/app/dist` build input.
+기본 bootstrap은 공식 Electron과 앱에 포함할 native CLI를 준비합니다. 원본 Grok 앱을 내려받는 복원용 bootstrap은 `npm run bootstrap:legacy`로 분리됩니다.
 
-`npm run package` compiles the reconstructed runtimes, applies the narrow
-renderer/settings transform, creates the app bundle, assigns the reconstructed
-bundle identity, ad-hoc signs it, and verifies the result. Output is written to:
+고정 버전은 벤디트봇 **0.3.6**, Electron **42.11.12**, 공식 Codex CLI **0.162.1**, 공식 Claude CLI **2.1.296**입니다. `package.json`과 `package-lock.json`에서 같은 버전을 사용합니다.
 
-```text
-dist/Grok Bot 0.18 Reconstructed.app
-```
+개발 실행은 `npm run package:dev` 후 `npm run dev:desktop`으로 준비된 개발 앱을 엽니다. raw Electron을 직접 실행하지 않습니다. 일반 제품 번들은 `npm run package`로 `dist/releases/0.3.6/벤디트봇.app`에 생성합니다. 이미 있는 릴리스는 덮어쓰지 않으며 기존 `dist/벤디트봇.app`과 실행 중인 운영 앱을 수정하거나 종료하지 않습니다. `/Applications` 또는 `~/Applications`에 자동 설치하지 않습니다. 현재 패키지는 개인용 ad-hoc 서명이며 외부 배포용 공증 완료를 뜻하지 않습니다.
 
-Reconstructed packages disable the upstream updater at the packaging boundary
-and default upstream Sentry and telemetry emission off. Explicitly supplied
-environment configuration is still respected.
+## 운영 앱과 업데이트
 
-## Architecture
+개발·검증은 별도 개발 앱과 프로필에서 수행합니다. 검증된 릴리스의 ZIP·서명 검사·동일 해시 QA 보고서가 준비된 뒤에만 로컬 업데이트 채널에 게시합니다. 게시 자체는 운영 앱을 바꾸지 않습니다. **설정 → 업데이트**에서 사용자가 설치를 선택해야 교체를 준비합니다. 검증·복사·백업 단계는 처리 바이트에 따른 퍼센트를 표시하고, 압축 해제·서명 확인·재시작 준비는 현재 단계로 표시합니다. 진행 중인 작업·팀·로그인·저장하지 못한 응답이 있으면 보류합니다.
 
-```text
-polished shipped renderer
-          │
-          │ desktop preload / RPC
-          ▼
-     Electron main
-          │
-          ├── settings, secrets, auth and plugin lifecycle
-          ├── remote box connector
-          └── owned local Docker connector
-                       │
-                       ▼
-              coordinator + host
-                       │
-              inference router
-           ┌───────────┼───────────┐
-        Cursor      Claude       Codex / OpenRouter
-                       │
-                 Grok Bot MCP tools
-```
+업데이트 준비는 입력 중 초안을 포함한 앱 데이터 루트의 영구 파일을 비공개로 백업하고 공급자 자식 프로세스가 종료된 것을 확인합니다. 준비 중 설정·새 작업·일반 종료를 막으며, 보조 프로세스가 준비됐다는 응답을 받은 뒤 앱을 종료합니다. 같은 앱의 다른 프로필이 실행 중이면 교체를 보류합니다. 새 앱은 데이터와 화면을 읽고 비공개 시작 확인을 완료한 뒤 창을 표시합니다. 시작 실패 시 새 프로세스의 종료를 확인하고 기존 앱으로 복구합니다. 개발 앱에서는 운영 업데이트를 설치하거나 기본 운영 데이터 폴더를 사용할 수 없습니다. 기존 0.1.0 앱에는 업데이트 버튼이 없으므로 최초 전환은 사용자가 작업을 마친 뒤 0.2.1 앱을 직접 열어야 합니다. 기존 데이터 경로를 유지하며 자동으로 전환하지 않습니다. 최종 설치·복구 검증 상태는 QA 보고서에서 확인합니다.
 
-The main source areas are:
+## 데이터와 격리
 
-- `source/electron-main/` — desktop lifecycle, settings, auth, box connectors,
-  coordinator ownership, and RPC handlers;
-- `source/electron-preload/` — the narrow trusted bridge exposed to the UI;
-- `source/host/` — inference, tools, MCP, settings, and turn execution;
-- `source/node-agent-coordinator/` — transcript routing, streaming activity,
-  reactions, and the routed MCP bridge;
-- `source/shared/` — shared contracts, settings, protocol, and provider helpers;
-- `frontend/` — readable React/TypeScript renderer reconstruction and design
-  workspace;
-- `scripts/` — bootstrap, compilation, renderer patching, packaging, signing,
-  and verification; and
-- `tests/` — publication and router regressions.
+일반 빌드의 기본 프로필은 `~/Library/Application Support/VenditBot/profiles/default/`입니다. 개발 빌드는 `VenditBot Development` 경로를 사용합니다. 프로필 아래에 에이전트·팀·대화·프로필 그림·설정·암호화된 API 키 및 공급자 전용 상태를 보관합니다.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for more detail.
+Codex는 전용 `CODEX_HOME`과 공식 macOS Keychain 저장을 사용합니다. Claude는 전용 `CLAUDE_CONFIG_DIR`와 공식 인증 저장을 사용합니다. 부모 프로세스의 공급자 키·기존 CLI 상태 경로·`SAND_*` 설정은 공급자 자식 프로세스에 자동 상속하지 않습니다. 기존 `~/.codex`, `~/.claude`, grokbot 데이터를 가져오거나 변경하지 않습니다.
 
-## Development commands
+사용량 표시는 공급자가 알려준 요청·토큰의 로컬 집계입니다. 공급자 청구서 또는 구독 잔여량과 동일하지 않습니다. 실제 연결 확인 요청에는 공급자 사용량이 발생할 수 있습니다.
 
-```sh
-npm test                  # focused regression tests
-npm run typecheck         # renderer TypeScript
-npm run source:typecheck  # runtime TypeScript
-npm run frontend:build    # build the readable renderer reconstruction
-npm run package           # build, sign, and verify the macOS app
-npm run verify            # verify an existing packaged app
-npm run smoke             # bounded native smoke check
-npm run publication:check # prove a fresh-history export is lossless
-```
+## 검증 상태
 
-Generated directories including `.cache`, `.build`, `dist`, `src/app/dist`,
-`recovered`, `recovery`, and local probe roots are ignored.
+현재 Mac의 앱에서 **Codex와 Claude 모두 실제 로그인과 응답을 확인**했습니다. 네이티브 에이전트 생성·폴더 선택·파일 쓰기 거절과 승인도 확인했습니다. Electron 42.11.12 개발 패키지의 native 실행 및 `codesign --verify --deep --strict` 검사를 통과했습니다. 기존 grokbot과 전역 CLI 인증은 변경하지 않았습니다.
 
-## Project status
+파일·프로필 격리, 모델·effort 전달, 실제 localhost 스트리밍, 설정 복사, 우선순위 전환, 회사형 팀 위임·재배분·후속 문맥, 대기열, 파일 승인, 이미지 생성·취소, preload 연결, 손상 파일과 종료 중 저장 실패 복구를 자동 테스트로 검사합니다. 로그인된 공식 Codex 런타임의 실제 PNG 생성도 한 번 확인했습니다. 그 결과와 최종 패키지의 전체 GUI 검증은 구분합니다. Claude 문맥 전달과 연결 전환의 장애 조합은 모의 공급자 테스트이며 모든 실계정 모델 조합의 성공을 뜻하지 않습니다.
 
-The app launches and the core reconstructed flows are usable, including routed
-inference, connected plugins, and the local Docker sandbox. This is still an
-experimental reconstruction: it targets one pinned macOS/arm64 release, depends
-on external provider sessions, and does not promise compatibility with future
-Grok Bot versions.
+각 릴리스 QA 보고서는 테스트 수·미실행 항목·ZIP 해시·서명 검사와 임시 앱에서의 교체·취소·롤백·실제 시작 결과를 기록합니다. 소스의 테스트 성공과 운영 서버·실계정 모델 검증은 구분합니다. 8시간·절전 복귀·모든 외부 API 실계정 호출은 별도 검증 대상으로 남아 있습니다. 개발 패키지 검증을 외부 배포용 공증 완료로 표시하지 않습니다.
 
-For changes, read [CONTRIBUTING.md](CONTRIBUTING.md). For the clean-history
-export procedure, see [docs/PUBLISHING.md](docs/PUBLISHING.md). Technical
-provenance and retained upstream boundaries are described in
-[PROVENANCE.md](PROVENANCE.md) and [NOTICE.md](NOTICE.md).
+개발·테스트·패키징·경로 계약은 [개발자 안내](docs/VENDITBOT.md)를 참고하세요. 원본과 의존성의 출처 및 사용 조건은 [NOTICE](NOTICE.md), [PROVENANCE](PROVENANCE.md), `resources/licenses/`에 보존합니다.

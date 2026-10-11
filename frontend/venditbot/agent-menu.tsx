@@ -1,0 +1,9 @@
+/** @jsxRuntime classic */
+/** @jsx React.createElement */
+import type * as ReactTypes from 'react';
+
+const React: typeof ReactTypes = window.React;
+const { Dialog, Button } = window.VDS;
+export function AgentMenu({ agent, kind = '에이전트', busy, canMoveUp = false, canMoveDown = false, onClose, onClone, onOpen, onEdit, onDelete, onMove }: { agent?: { name: string }; kind?: '에이전트' | '팀'; busy?: boolean; canMoveUp?: boolean; canMoveDown?: boolean; onClose(): void; onClone(): void; onOpen?(): void; onEdit?(): void; onDelete?(): void; onMove?(offset: number): void }) {
+  return <Dialog.Root open={!!agent} onOpenChange={(open: boolean) => { if (!open) onClose(); }}><Dialog.Portal managed={false}><Dialog.Content size="normal"><Dialog.Header title={`${agent?.name ?? kind} 메뉴`} description={kind === '에이전트' ? '저장된 역할, AI 연결, 작업 정책과 폴더 설정을 복사하고 비슷한 새 프로필 사진을 만듭니다.' : '팀 구성과 지침을 복사합니다. 작업 기록은 새 팀에 포함하지 않습니다.'} /><div className="dialog-body">{onOpen && <Button kind="common" hierarchy="ghost" size="medium" onPress={onOpen}>대화 열기</Button>}{onEdit && <Button kind="common" hierarchy="ghost" size="medium" onPress={onEdit}>{kind} 수정</Button>}<Button kind="vendit" hierarchy="secondary" size="medium" disabled={busy} loading={busy} onPress={onClone}>{kind} 복제</Button>{onMove && <div className="route-actions"><Button kind="common" hierarchy="ghost" size="small" disabled={!canMoveUp} onPress={() => onMove(-1)}>목록에서 앞으로</Button><Button kind="common" hierarchy="ghost" size="small" disabled={!canMoveDown} onPress={() => onMove(1)}>목록에서 뒤로</Button></div>}{onDelete && <Button kind="destructive" hierarchy="ghost" size="medium" disabled={busy} onPress={onDelete}>{kind} 삭제</Button>}</div><Dialog.Footer RightComponent={() => <Button kind="common" hierarchy="ghost" size="medium" onPress={onClose}>닫기</Button>} /></Dialog.Content></Dialog.Portal></Dialog.Root>;
+}

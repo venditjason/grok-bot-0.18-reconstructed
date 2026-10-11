@@ -1,0 +1,39 @@
+{
+  "version": "18.3.1",
+  "reportedRuntimeVersions": {
+    "react": "18.3.1",
+    "reactDOM": "18.3.1-next-f1338f8080-20240426"
+  },
+  "packages": [
+    {
+      "name": "react",
+      "file": "react.production.min.js",
+      "integrity": "sha512-wS+hAgJShR0KhEvPJArfuPVN1+Hz1t0Y6n5jLrGQbkb4urgPE/0Rve+1kMB1v/oWgHgm4WIcV+i7F2pTVj+2iQ==",
+      "sourceSha256": "d949f1c3687aedadcedac85261865f29b17cd273997e7f6b2bfc53b2f9d4c4dd",
+      "version": "18.3.1",
+      "tarball": "https://registry.npmjs.org/react/-/react-18.3.1.tgz",
+      "sourcePath": "package/umd/react.production.min.js",
+      "sourceBytes": 10751
+    },
+    {
+      "name": "react-dom",
+      "file": "react-dom.production.min.js",
+      "integrity": "sha512-5m4nQKp+rZRb09LNH59GM4BxTh9251/ylbKIbpe7TpGxfJ+9kv6BLkLBXIjjspbgbnIBNqlI23tRnTWT0snUIw==",
+      "sourceSha256": "35f4f974f4b2bcd44da73963347f8952e341f83909e4498227d4e26b98f66f0d",
+      "version": "18.3.1",
+      "tarball": "https://registry.npmjs.org/react-dom/-/react-dom-18.3.1.tgz",
+      "sourcePath": "package/umd/react-dom.production.min.js",
+      "sourceBytes": 131835
+    }
+  ],
+  "licenseSha256": "52412d7bc7ce4157ea628bbaacb8829e0a9cb3c58f57f99176126bc8cf2bfc85",
+  "outputSha256": "5787e1666057b2c187e25e93102e2dacf8ade923039215d2fc81e6d8edaff6c9",
+  "outputBytes": 142960,
+  "mode": "official-production-umd",
+  "dependencyScope": "VenditBot browser asset only; npm React dependencies unchanged",
+  "sourceDocumentation": [
+    "https://legacy.reactjs.org/docs/cdn-links.html",
+    "https://legacy.reactjs.org/docs/optimizing-performance.html"
+  ],
+  "reproduction": "node scripts/vendor-react-runtime.mjs <directory containing the two pinned official npm tarballs>"
+}

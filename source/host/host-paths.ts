@@ -2,15 +2,15 @@ import { lstat, readlink, rm, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-import { getSandVariant } from "../shared/node/sand-variant.js";
+import { resolveVenditBotPaths } from "../shared/node/venditbot-paths.js";
 import { isPathWithin } from "../shared/node/paths.js";
 import { findSystemErrno } from "../shared/system-errno.js";
 
-export const SAND_DATA_ROOT_ENV = "SAND_DATA_ROOT";
-export const SAND_PRODUCTION_DATA_DIRNAME = ".grokbot";
-export const SAND_USER_DATA_DIR_ENV = "SAND_USER_DATA_DIR";
+export const SAND_DATA_ROOT_ENV = "VENDITBOT_DATA_ROOT";
+export const SAND_PRODUCTION_DATA_DIRNAME = "VenditBot";
+export const SAND_USER_DATA_DIR_ENV = "VENDITBOT_USER_DATA_DIR";
 export const SAND_DATA_DIRNAME = "sand-data";
-export const USER_DATA_DIR_FLAG = "--user-data-dir";
+export const USER_DATA_DIR_FLAG = "--venditbot-user-data-dir";
 export const SAND_BOX_HOME_DIR = "/home/box";
 export const SAND_BOX_DATA_ROOT = `${SAND_BOX_HOME_DIR}/${SAND_DATA_DIRNAME}`;
 export const SAND_BOX_MODEL_VISIBLE_DATA_ROOT = `${SAND_BOX_HOME_DIR}/agent-data`;
@@ -56,7 +56,7 @@ export function resolveSandUserDataDir(argv: readonly string[] = [], env: NodeJS
   return isAbsolute(trimmed) ? trimmed : resolve(cwd, trimmed);
 }
 
-export function getSandProductionRootDir(homeDir = homedir()): string { return join(homeDir, SAND_PRODUCTION_DATA_DIRNAME); }
+export function getSandProductionRootDir(homeDir = homedir()): string { return join(resolveVenditBotPaths({ homeDir, development: false, env: {} }).profileRoot, "agent-data"); }
 
 export function resolveSandDataRootOverride(env: NodeJS.ProcessEnv = process.env): string | null {
   const override = env[SAND_DATA_ROOT_ENV]?.trim();
@@ -66,20 +66,12 @@ export function resolveSandDataRootOverride(env: NodeJS.ProcessEnv = process.env
 export function getSandRootDir(homeDir = homedir()): string {
   const override = resolveSandDataRootOverride();
   if (override != null) return override;
-  const userDataDir = resolveSandUserDataDir([], process.env);
-  if (userDataDir != null) return join(userDataDir, SAND_DATA_DIRNAME);
-  const variant = getSandVariant();
-  return variant === "sand" ? getSandProductionRootDir(homeDir) : join(homeDir, ".cursor", variant);
+  return join(resolveVenditBotPaths({ homeDir }).profileRoot, "agent-data");
 }
 
 export function reanchorSandPath(storedPath: string): string {
-  const root = getSandRootDir();
-  if (isPathWithin(root, storedPath, { isInclusive: true })) return storedPath;
-  const match = /(?:[/\\]\.cursor[/\\]sand(?:-[^/\\]+)?|[/\\]\.grokbot)[/\\](.+)$/.exec(storedPath);
-  if (match?.[1] == null) return storedPath;
-  const segments = match[1].split(/[/\\]+/);
-  if (segments.some((segment) => segment === "." || segment === "..")) return storedPath;
-  return join(root, ...segments);
+  // No implicit migration or aliasing of data from another application's profile.
+  return storedPath;
 }
 
 export function getGatewayDiscoveryPath(homeDir = homedir()): string { return join(getSandRootDir(homeDir), "gateway.json"); }
