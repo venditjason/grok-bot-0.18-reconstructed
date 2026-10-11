@@ -180,6 +180,11 @@ nav[data-sidebar-dragging="true"] .agent-photo-tile:hover { transform: none; }
 .settings-tab-header .settings-sections { margin-bottom: 0; }
 .settings-page > .sidebar-update { max-width: 440px; margin-top: 24px; padding: 0; }
 
+/* The sidebar can narrow settings independently of the window viewport. */
+.auth-grid,.form-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+.auth-card .card-heading { flex-wrap: wrap; }
+.auth-card .card-heading > :last-child { flex-shrink: 0; }
+
 .action-rule-list { display: flex; flex-direction: column; gap: 20px; }
 .action-rule-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 18px; align-items: start; }
 .action-rule-row p, .action-rule-row details { margin-top: 6px; }
