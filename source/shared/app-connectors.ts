@@ -2,7 +2,7 @@
 export type AppId = 'gmail' | 'google_calendar' | 'google_drive' | 'google_docs' | 'google_sheets' | 'notion' | 'slack' | 'github';
 export type AppConnectorProvider = 'google' | 'notion' | 'slack' | 'github';
 export type AppConnectorStatus = 'setup_required' | 'disconnected' | 'authorizing' | 'connected' | 'verifying' | 'error';
-export type AppConnectorPhase = 'discovering' | 'registering' | 'opening_browser' | 'awaiting_consent' | 'exchanging_token' | 'saving_credential' | 'checking_connection';
+export type AppConnectorPhase = 'reading_registration' | 'discovering' | 'registering' | 'opening_browser' | 'awaiting_consent' | 'exchanging_token' | 'saving_credential' | 'checking_connection';
 export type AppConnectorRegistration = 'managed' | 'dynamic' | 'custom' | 'unavailable';
 export type AppDeviceAuthorization = {userCode:string; verificationUri:string; expiresAt:string};
 export type AppConnectorTest = {ok: boolean; checkedAt: string; message: string; kind: 'api_read' | 'mcp_handshake'; toolCount?: number};

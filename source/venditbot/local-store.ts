@@ -1,4 +1,6 @@
+import {validChatAttachments,type ChatAttachment} from '../shared/chat-attachments.js';
 import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
+import {SecureStorageError} from './secure-storage-error.js';
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
@@ -8,8 +10,8 @@ export type ToolRecord = { callId: string; name: string; path?: string; status: 
 export type ConnectionRoute = { connectionId: string; model: string; effort?: string };
 export type ConnectionAttempt = ConnectionRoute & { status: 'running' | 'failed' | 'completed'; error?: string };
 export type AvatarRequestRecord = {requestId: string; ownerKey: string; sessionId?: string; phase: 'validating' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; assetId?: string; error?: string};
-export type ChatMessage = { id: string; role: 'user' | 'assistant'; text: string; createdAt: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; tools?: ToolRecord[]; attempts?: ConnectionAttempt[]; routeSelection?: AgentPolicySelection };
-export type ChatSession = { routineDispatchId?: string; development?: DevelopmentBinding; id: string; title: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; agentId?: string; agentName?: string; instructions?: string; teamRunId?: string; teamStepIndex?: number; purpose?: 'avatar'; avatarRequest?: AvatarRequestRecord; automation?: {policyId: string}; policySnapshot?: AgentPolicy; policyAllowedConnections?: ConnectionRoute[]; policyTaskText?: string; routeSelection?: AgentPolicySelection; taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; queuedPrompt?: string; createdAt: string; updatedAt: string; workspacePath?: string; providerSessionId?: string; providerSessionBinding?: string; messages: ChatMessage[] };
+export type ChatMessage = { attachments?: ChatAttachment[]; id: string; role: 'user' | 'assistant'; text: string; createdAt: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; tools?: ToolRecord[]; attempts?: ConnectionAttempt[]; routeSelection?: AgentPolicySelection };
+export type ChatSession = { queuedAttachments?:ChatAttachment[]; routineDispatchId?: string; development?: DevelopmentBinding; id: string; title: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; agentId?: string; agentName?: string; instructions?: string; teamRunId?: string; teamStepIndex?: number; purpose?: 'avatar'; avatarRequest?: AvatarRequestRecord; automation?: {policyId: string}; policySnapshot?: AgentPolicy; policyAllowedConnections?: ConnectionRoute[]; policyTaskText?: string; routeSelection?: AgentPolicySelection; taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; queuedPrompt?: string; createdAt: string; updatedAt: string; workspacePath?: string; providerSessionId?: string; providerSessionBinding?: string; messages: ChatMessage[] };
 
 export function validPolicySnapshot(value: unknown): value is AgentPolicy {try {normalizeAgentPolicy(value); return true;} catch {return false;}}
 export function validAvatarRequest(value: unknown): value is AvatarRequestRecord {
@@ -37,7 +39,7 @@ function date(value: unknown): boolean { return text(value, 40) && Number.isFini
 function validSession(value: unknown): value is ChatSession {
   if (!value || typeof value !== 'object') return false;
   const s = value as ChatSession;
-  return (s.routineDispatchId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s.routineDispatchId)) && (s.development === undefined || validDevelopmentBinding(s.development)) && text(s.id, 100) && text(s.title, 200) && text(s.connectionId, 200) && text(s.model, 200) && date(s.createdAt) && date(s.updatedAt)
+  return (s.queuedAttachments===undefined||validChatAttachments(s.queuedAttachments)) && (s.routineDispatchId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s.routineDispatchId)) && (s.development === undefined || validDevelopmentBinding(s.development)) && text(s.id, 100) && text(s.title, 200) && text(s.connectionId, 200) && text(s.model, 200) && date(s.createdAt) && date(s.updatedAt)
     && (s.effort === undefined || text(s.effort, 40)) && (s.workspacePath === undefined || text(s.workspacePath, 4096)) && (s.providerSessionId === undefined || text(s.providerSessionId, 200))
     && (s.connections === undefined || validConnections(s.connections)) && (s.providerSessionBinding === undefined || text(s.providerSessionBinding, 500))
     && (s.agentId === undefined || text(s.agentId, 100)) && (s.agentName === undefined || text(s.agentName, 80)) && (s.instructions === undefined || text(s.instructions, 16000))
@@ -49,7 +51,7 @@ function validSession(value: unknown): value is ChatSession {
     && (s.routeSelection === undefined || validAgentPolicySelection(s.routeSelection))
     && (s.taskStatus === undefined || ['queued', 'running', 'completed', 'failed', 'cancelled'].includes(s.taskStatus)) && (s.queuedPrompt === undefined || text(s.queuedPrompt, 500_000))
     && Array.isArray(s.messages) && s.messages.length <= 20_000 && new Set(s.messages.map(m => m?.id)).size === s.messages.length
-    && s.messages.every(m => m && text(m.id, 100) && ['user', 'assistant'].includes(m.role) && text(m.text, 2_000_000) && date(m.createdAt)
+    && s.messages.every(m => m && (m.attachments===undefined||validChatAttachments(m.attachments)) && text(m.id, 100) && ['user', 'assistant'].includes(m.role) && text(m.text, 2_000_000) && date(m.createdAt)
       && ['running', 'completed', 'failed', 'cancelled'].includes(m.status) && (m.error === undefined || text(m.error, 2000))
       && (m.routeSelection === undefined || validAgentPolicySelection(m.routeSelection))
       && (m.attempts === undefined || (Array.isArray(m.attempts) && m.attempts.length > 0 && m.attempts.length <= 8 && m.attempts.every(a => validConnectionRoute(a) && ['running', 'failed', 'completed'].includes(a.status) && (a.error === undefined || text(a.error, 2000)))))
@@ -153,7 +155,7 @@ export class EncryptedSecretStore {
   /** Native Keychain work cannot be cancelled, but its late result never commits. */
   private native<T>(operation: (assertActive: () => void) => Promise<T>, signal?: AbortSignal): Promise<T> {
     if (signal?.aborted) return Promise.reject(new DOMException('보안 저장소 요청을 취소했습니다.', 'AbortError'));
-    if (this.nativePending) return Promise.reject(new Error('이전 macOS 보안 저장소 요청이 아직 처리 중입니다. 시스템 확인 창을 마친 뒤 다시 시도하세요.'));
+    if (this.nativePending) return Promise.reject(new SecureStorageError('pending'));
     this.nativePending = true; let active = true;
     const assertActive = () => { if (!active || signal?.aborted) throw new DOMException('보안 저장소 요청을 취소했습니다.', 'AbortError'); };
     const pending = Promise.resolve().then(() => { assertActive(); return operation(assertActive); });
@@ -162,13 +164,13 @@ export class EncryptedSecretStore {
     return new Promise<T>((resolve, reject) => {
       const finish = (error?: unknown, value?: T) => { active = false; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(value as T); };
       const abort = () => finish(new DOMException('보안 저장소 요청을 취소했습니다.', 'AbortError'));
-      const timer = setTimeout(() => finish(new Error('macOS 보안 저장소 응답 시간이 초과되었습니다. 기존 API 키는 변경하지 않았습니다. 시스템 확인 창을 마친 뒤 다시 시도하세요.')), this.timeoutMs);
+      const timer = setTimeout(() => finish(new SecureStorageError('timeout')), this.timeoutMs);
       signal?.addEventListener('abort', abort, {once: true});
-      pending.then(value => finish(undefined, value), () => finish(new Error('macOS 보안 저장소 요청에 실패했습니다. 기존 API 키는 보존했습니다. 시스템 키체인 접근을 확인한 뒤 다시 시도하세요.')));
+      pending.then(value => finish(undefined, value), error => finish(error instanceof SecureStorageError ? error : new SecureStorageError('failed')));
     });
   }
   private async available(): Promise<void> {
-    if (!await this.encryption.isAsyncEncryptionAvailable()) throw new Error('macOS 보안 저장소를 사용할 수 없어 키를 읽거나 저장하지 않았습니다.');
+    if (!await this.encryption.isAsyncEncryptionAvailable()) throw new SecureStorageError('unavailable');
   }
   async read(key: string, signal?: AbortSignal): Promise<string | undefined> {
     const value = this.load()[key]; if (!value) return undefined;
@@ -208,14 +210,14 @@ export class EncryptedSecretStore {
 }
 
 /** Failed/cancelled turns remain visible but are never silently re-submitted. */
-export function completedHistory(session: ChatSession, currentUserId: string): {role: 'user' | 'assistant' | 'tool'; content: string | unknown[]}[] {
+export function completedHistory(session: ChatSession, currentUserId: string, content: (message:ChatMessage)=>string|unknown[] = message=>message.text): {role: 'user' | 'assistant' | 'tool'; content: string | unknown[]}[] {
   const result: {role: 'user' | 'assistant' | 'tool'; content: string | unknown[]}[] = [];
   for (let i = 0; i < session.messages.length; i++) {
     const message = session.messages[i]!;
-    if (message.id === currentUserId) { result.push({role: 'user', content: message.text}); break; }
+    if (message.id === currentUserId) { result.push({role: 'user', content: content(message)}); break; }
     const next = session.messages[i + 1];
     if (message.role === 'user' && next?.role === 'assistant' && next.status === 'completed') {
-      result.push({role: 'user', content: message.text});
+      result.push({role: 'user', content: content(message)});
       for (const tool of next.tools ?? []) if (tool.input !== undefined && tool.output !== undefined) result.push(
         {role: 'assistant', content: [{type: 'tool-call', toolCallId: tool.callId, toolName: tool.name, args: tool.input}]},
         {role: 'tool', content: [{type: 'tool-result', toolCallId: tool.callId, toolName: tool.name, result: tool.output}]},
@@ -227,7 +229,7 @@ export function completedHistory(session: ChatSession, currentUserId: string): {
 }
 
 export function sessionMarkdown(session: ChatSession): string {
-  return `# ${session.title}\n\n연결: ${session.connectionId}\n모델: ${session.model || '공급자 기본값'}\nEffort: ${session.effort || '공급자 기본값'}\n` + session.messages.map(m => `\n## ${m.role === 'user' ? '사용자' : '벤디트봇'} · ${m.createdAt}\n\n${m.text}\n${m.status !== 'completed' ? `\n[${m.status}] ${m.error ?? ''}\n` : ''}`).join('');
+  return `# ${session.title}\n\n연결: ${session.connectionId}\n모델: ${session.model || '공급자 기본값'}\nEffort: ${session.effort || '공급자 기본값'}\n` + session.messages.map(m => `\n## ${m.role === 'user' ? '사용자' : '벤디트봇'} · ${m.createdAt}\n\n${m.text}${m.attachments?.length ? '\n\n첨부: '+m.attachments.map(a=>a.name+' ('+a.bytes+' bytes; SHA256 '+a.sha256+')').join(', ') : ''}\n${m.status !== 'completed' ? `\n[${m.status}] ${m.error ?? ''}\n` : ''}`).join('');
 }
 
 export function safeError(error: unknown): string {

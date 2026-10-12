@@ -38,3 +38,9 @@ test('efficiency validation rejects malformed bounds and guidance does not claim
  assert.throws(()=>boundPolicyHistory([{role:'user',content:'unfinished'},{role:'tool',content:[]},{role:'user',content:'current'}],efficiency));
  for(const preset of EFFICIENCY_PRESETS){const text=efficiencyInstructions({...efficiency,preset:preset.id},2);assert.match(text,/전체 기록은 앱에 보존/);assert.match(text,/도구 승인/);assert.match(text,/전체 토큰 또는 비용 한도가 아닙니다/);}
 });
+
+test('compact history counts prior attachment payload but preserves current image request and full stored transcript',()=>{
+ const image={type:'image',image:'data:image/png;base64,'+'A'.repeat(6000)},current={role:'user',content:[{type:'text',text:'new request'},image]};
+ const history=[{role:'user',content:[{type:'text',text:'old attachment'},image]},{role:'assistant',content:'finished'},current],before=structuredClone(history);
+ const result=boundPolicyHistory(history,efficiency);assert.deepEqual(result.messages,[current]);assert.equal(result.omittedTurns,1);assert.equal(result.historyCharacters,0);assert.deepEqual(history,before);
+});

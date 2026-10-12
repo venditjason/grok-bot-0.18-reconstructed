@@ -23,7 +23,7 @@ type HistoryMessage = {role: 'user' | 'assistant' | 'tool'; content: string | un
 /** Select a suffix of whole completed turns. Never slices a request, tool pair or saved transcript. */
 export function boundPolicyHistory(history: readonly HistoryMessage[], rawEfficiency: PolicyEfficiency) {
   const efficiency = normalizePolicyEfficiency(rawEfficiency), current = history.at(-1);
-  if (!current || current.role !== 'user' || typeof current.content !== 'string') throw new Error('절약 문맥은 현재 사용자 요청으로 끝나야 합니다.');
+  if (!current || current.role !== 'user' || typeof current.content !== 'string' && !Array.isArray(current.content)) throw new Error('절약 문맥은 현재 사용자 요청으로 끝나야 합니다.');
   const groups: HistoryMessage[][] = [];
   for (const message of history.slice(0, -1)) {
     if (message.role === 'user') groups.push([]);

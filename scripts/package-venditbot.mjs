@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createPackageWithOptions } from "@electron/asar";
 import { PRODUCT_IDENTITY } from "../source/shared/product-identity.ts";
 import { applyMacProductIdentity, verifyMacProductIdentity } from "./lib/macos-product-identity.mjs";
-import { signAppBundleAdHoc } from "./lib/codesign.mjs";
+import {signingConfiguration,requireSigningIdentity,signingContinuityBaseline,signVenditBundle,verifyVenditBundleSigning,assertSigningContinuity} from './lib/venditbot-signing.mjs';
 import { capture, run } from "./lib/process.mjs";
 import { claimReleaseOutput } from './lib/venditbot-release-output.mjs';
 import {validateRendererAssets} from './lib/venditbot-renderer-assets.mjs';
@@ -15,6 +15,12 @@ import {validateRendererAssets} from './lib/venditbot-renderer-assets.mjs';
 if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("VenditBot packaging requires native macOS arm64. Other targets have not been validated.");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const development = process.argv.includes("--development");
+const signing=signingConfiguration({development});
+await requireSigningIdentity(signing);
+const previousAppArg=process.argv.indexOf('--previous-app');
+if(previousAppArg!==-1&&(!process.argv[previousAppArg+1]||process.argv[previousAppArg+1].startsWith('--')))throw new Error('--previous-app requires the previous certificate-signed application path.');
+const initialCertificateRelease=process.argv.includes('--initial-certificate-release');
+const previousSigning=await signingContinuityBaseline({config:signing,previousApp:previousAppArg===-1?undefined:process.argv[previousAppArg+1],initialCertificateRelease,identifier:PRODUCT_IDENTITY.bundleId});
 const staged = path.join(root, ".build", "venditbot-app");
 const rendererSnapshot=await validateRendererAssets(path.join(staged,'renderer'));
 const runtime = path.join(root, "node_modules", "electron", "dist", "Electron.app");
@@ -84,30 +90,12 @@ for (const key of ["CFBundleShortVersionString", "CFBundleVersion"]) await run("
 // in with the CLI payloads, after the initial Electron-template cleanup.
 await run("/usr/bin/xattr", ["-cr", temporary]);
 
-// Official CLI distributions can include nested executables and dylibs outside the ASAR.
-// Sign only our copied files; never alter node_modules or a global CLI installation.
-async function signCopiedNativeFiles(directory) {
-  let entries;
-  try { entries = await readdir(directory, { withFileTypes: true }); } catch (error) { if (error.code === "ENOENT") return; throw error; }
-  for (const entry of entries) {
-    const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) await signCopiedNativeFiles(target);
-    else if (entry.isFile()) {
-      const kind = await capture("/usr/bin/file", ["-b", target]);
-      if (kind.includes("Mach-O")) {
-        const architectures = (await capture("/usr/bin/lipo", ["-archs", target])).split(/\s+/);
-        if (!architectures.includes("arm64")) throw new Error(`Packaged runtime is not arm64-compatible: ${target}`);
-        await run("/usr/bin/codesign", ["--force", "--timestamp=none", "--sign", "-", target]);
-      }
-    }
-  }
-}
-await signCopiedNativeFiles(path.join(resources, "runtimes"));
-await signCopiedNativeFiles(path.join(resources, "app.asar.unpacked"));
 // Finder can restore bundle-directory metadata while the native payload is
 // being signed. Clear the copied tree once more immediately before sealing it.
 await run("/usr/bin/xattr", ["-cr", temporary]);
-await signAppBundleAdHoc(temporary);
+// Sign every copied Mach-O, nested framework/helper and root with the one pinned identity.
+const signingVerification=await signVenditBundle(temporary,signing);
+if(previousSigning)assertSigningContinuity(previousSigning,signingVerification);
 await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", temporary]);
 const identity = await verifyMacProductIdentity(temporary, { development });
 await mkdir(path.dirname(output), { recursive: true });
@@ -119,6 +107,8 @@ await run("/usr/bin/ditto", ["-x", "-k", temporaryArchive, archiveCheck]);
 const extractedApp = path.join(archiveCheck, path.basename(temporary));
 await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", extractedApp]);
 await verifyMacProductIdentity(extractedApp, {development});
+const extractedSigning=await verifyVenditBundleSigning(extractedApp,signing);
+if(!development)assertSigningContinuity(signingVerification,extractedSigning);
 if (development) {
   // Recheck after slow signing/archive validation: a test app may have opened.
   await assertOutputNotRunning();
@@ -143,6 +133,6 @@ catch (error) {
   console.warn(copiedAppWarning);
 }
 const archiveSha256 = createHash("sha256").update(await readFile(archiveOutput)).digest("hex");
-await writeFile(path.join(outputDirectory, development ? "venditbot-development-package-verification.json" : "venditbot-package-verification.json"), `${JSON.stringify({ ...identity, version, appPath: output, archivePath: archiveOutput, archiveSha256, archiveSignatureVerified: true, copiedAppSignatureVerified, ...(copiedAppWarning ? {copiedAppWarning} : {}), signature: "ad-hoc-personal-validation", notarized: false, nativeDockerArm64Verified: false, packagedAt: new Date().toISOString() }, null, 2)}\n`, {flag: development ? "w" : "wx"});
-console.log(`Packaged ${identity.displayName}: ${output} (arm64; ${identity.helperCount} renamed helpers; ad-hoc signed, not notarized)`);
+await writeFile(path.join(outputDirectory, development ? "venditbot-development-package-verification.json" : "venditbot-package-verification.json"), `${JSON.stringify({ ...identity, version, appPath: output, archivePath: archiveOutput, archiveSha256, archiveSignatureVerified: true, copiedAppSignatureVerified, ...(copiedAppWarning ? {copiedAppWarning} : {}), ...extractedSigning, signingContinuity: development?'development-only':previousSigning?'verified-with-previous-app':'explicit-initial-certificate-transition', notarized: false, nativeDockerArm64Verified: false, packagedAt: new Date().toISOString() }, null, 2)}\n`, {flag: development ? "w" : "wx"});
+console.log(`Packaged ${identity.displayName}: ${output} (arm64; ${identity.helperCount} renamed helpers; ${extractedSigning.signature}, not notarized)`);
 await rm(temporaryRoot, {recursive: true, force: true});

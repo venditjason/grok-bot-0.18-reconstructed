@@ -493,7 +493,7 @@ function codexInput(content: string | readonly unknown[]): Loose[] {
   return content.map(part => {
     const item = part as Loose;
     if (item.type === "text" && typeof item.text === "string") return { type: "text", text: item.text };
-    if (item.type === "image" && typeof item.image === "string" && /^https:\/\//.test(item.image)) return { type: "image", url: item.image };
+    if (item.type === "image" && typeof item.image === "string" && (/^https:\/\//.test(item.image) || /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(item.image))) return { type: "image", url: item.image };
     throw new Error("이 Codex 경로에서 지원하지 않는 첨부 형식입니다.");
   });
 }
@@ -508,6 +508,7 @@ function codexHistoryItems(message: ProviderMessage): Loose[] {
   for (const raw of message.content) {
     const part = raw as Loose;
     if (part.type === "text" && typeof part.text === "string" && role !== "tool") textParts.push({ type: role === "assistant" ? "output_text" : "input_text", text: part.text });
+    else if (part.type === "image" && role === "user" && typeof part.image === "string" && /^data:image\/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(part.image)) textParts.push({type:"input_image",image_url:part.image});
     else if (part.type === "tool-call" && typeof part.toolCallId === "string") items.push({ type: "function_call", call_id: part.toolCallId, name: part.toolName, arguments: JSON.stringify(part.args) });
     else if (part.type === "tool-result" && typeof part.toolCallId === "string") items.push({ type: "function_call_output", call_id: part.toolCallId, output: JSON.stringify(part.result) });
     else throw new Error("지원하지 않는 Codex 대화 항목입니다.");
