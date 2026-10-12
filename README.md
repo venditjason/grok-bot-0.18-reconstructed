@@ -64,9 +64,9 @@ open "dist/벤디트봇 개발.app"
 
 기본 bootstrap은 공식 Electron과 앱에 포함할 native CLI를 준비합니다. 원본 Grok 앱을 내려받는 복원용 bootstrap은 `npm run bootstrap:legacy`로 분리됩니다.
 
-고정 버전은 벤디트봇 **0.3.7**, Electron **42.11.12**, 공식 Codex CLI **0.162.1**, 공식 Claude CLI **2.1.296**입니다. `package.json`과 `package-lock.json`에서 같은 버전을 사용합니다.
+고정 버전은 벤디트봇 **0.3.8**, Electron **42.11.12**, 공식 Codex CLI **0.162.1**, 공식 Claude CLI **2.1.296**입니다. `package.json`과 `package-lock.json`에서 같은 버전을 사용합니다.
 
-개발 실행은 `npm run package:dev` 후 `npm run dev:desktop`으로 준비된 개발 앱을 엽니다. raw Electron을 직접 실행하지 않습니다. 일반 제품 번들은 `npm run package`로 `dist/releases/0.3.7/벤디트봇.app`에 생성합니다. 이미 있는 릴리스는 덮어쓰지 않으며 기존 `dist/벤디트봇.app`과 실행 중인 운영 앱을 수정하거나 종료하지 않습니다. `/Applications` 또는 `~/Applications`에 자동 설치하지 않습니다. 현재 패키지는 개인용 ad-hoc 서명이며 외부 배포용 공증 완료를 뜻하지 않습니다.
+개발 실행은 `npm run package:dev` 후 `npm run dev:desktop`으로 준비된 개발 앱을 엽니다. raw Electron을 직접 실행하지 않습니다. 일반 제품 번들은 `npm run package`로 `dist/releases/0.3.8/벤디트봇.app`에 생성합니다. 이미 있는 릴리스는 덮어쓰지 않으며 기존 `dist/벤디트봇.app`과 실행 중인 운영 앱을 수정하거나 종료하지 않습니다. `/Applications` 또는 `~/Applications`에 자동 설치하지 않습니다. 현재 패키지는 개인용 ad-hoc 서명이며 외부 배포용 공증 완료를 뜻하지 않습니다.
 
 ## 운영 앱과 업데이트
 

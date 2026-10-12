@@ -38,7 +38,7 @@ bootstrap은 공식 Electron·native CLI만 준비한다. `package.json`과 `pac
 
 | 구성 | 고정 버전 |
 | --- | --- |
-| 벤디트봇 | 0.3.7 |
+| 벤디트봇 | 0.3.8 |
 | Electron | 42.11.12 |
 | 공식 Codex CLI | 0.162.1 |
 | 공식 Claude CLI | 2.1.296 |
