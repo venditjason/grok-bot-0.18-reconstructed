@@ -234,3 +234,10 @@ nav[data-sidebar-dragging="true"] .agent-photo-tile:hover { transform: none; }
 .rabbit-settings > .section-heading > button { flex: 0 0 auto; white-space: nowrap; }
 
 .team-autonomy-settings { display: flex; flex-direction: column; gap: 10px; padding: 16px; }
+/* Non-modal pointer menu: no viewport-sized overlay or background dimming. */
+.profile-context-menu { position: fixed; z-index: 60; width: 208px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow: auto; padding: 5px; border: 1px solid var(--v-line-outline-stroke); border-radius: 10px; background: var(--v-background-base-normal); box-shadow: 0 6px 24px rgb(0 0 0 / .16), 0 1px 4px rgb(0 0 0 / .08); }
+.profile-context-menu-title { padding: 6px 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.profile-context-menu > button { display: block; width: 100%; min-height: 32px; padding: 6px 9px; border: 0; border-radius: 5px; text-align: left; font: inherit; cursor: pointer; background: transparent; }
+.profile-context-menu > button:not(:disabled):is(:hover, :focus-visible) { background: var(--v-effect-state-hover); outline: none; }
+.profile-context-menu > button:disabled { opacity: .4; cursor: default; }
+.profile-context-menu > [role="separator"] { height: 1px; margin: 4px; background: var(--v-line-separator-stroke); }

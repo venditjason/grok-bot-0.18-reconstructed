@@ -1,5 +1,6 @@
+import {validDevelopmentBinding} from '../../source/shared/development-routing';
 import { ACTION_RULE_CATEGORIES, type ActionRules } from '../../source/shared/action-rules';
-import type { AgentPolicyDraft } from '../../source/shared/agent-policy';
+import { normalizePolicyEfficiency, type AgentPolicyDraft } from '../../source/shared/agent-policy';
 import type * as ReactTypes from 'react';
 import type { AgentDraft, TeamDraft } from './ui-state';
 const React: typeof ReactTypes = window.React;
@@ -28,12 +29,14 @@ export function agentEditDrafts(value: unknown): Record<string, AgentEditDraft> 
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
+    if (d.development !== undefined && !validDevelopmentBinding(d.development)) return;
     if (!string(d.name, 80) || !string(d.instructions, 16000) || !string(d.connectionId, 200) || !string(d.model, 200) || !optional(d.id, 100) || !optional(d.effort, 40) || !optional(d.avatarId, 100) || !optional(d.workspacePath, 4096) || !optional(record.avatarOwnerKey, 120) || !optional(record.avatarRequestId, 100) || !optional(record.avatarAppliedRequestId, 100) || !string(record.avatarPrompt, 4000) || (record.avatarMode !== undefined && record.avatarMode !== 'image' && record.avatarMode !== 'illustration')) return;
     if (d.automation !== undefined && (!object(d.automation) || !string(d.automation.policyId, 100))) return;
     const routes = d.connections;
     if (routes !== undefined && (!Array.isArray(routes) || routes.length > 8 || routes.some(r => !object(r) || !string(r.connectionId, 200) || !string(r.model, 200) || !optional(r.effort, 40)))) return;
     const draft: AgentDraft = { name: d.name, instructions: d.instructions, connectionId: d.connectionId, model: d.model };
     for (const field of ['id', 'effort', 'avatarId', 'workspacePath'] as const) if (typeof d[field] === 'string') draft[field] = d[field];
+    if (validDevelopmentBinding(d.development)) draft.development = {mode: 'rabbit', connectionId: d.development.connectionId};
     if (object(d.automation)) draft.automation = { policyId: d.automation.policyId as string };
     if (Array.isArray(routes)) draft.connections = routes.map(r => ({ connectionId: r.connectionId, model: r.model, ...(r.effort ? { effort: r.effort } : {}) }));
     result[key] = { draft, avatarPrompt: record.avatarPrompt, ...(record.avatarMode ? { avatarMode: record.avatarMode } : {}), ...Object.fromEntries(['avatarOwnerKey', 'avatarRequestId', 'avatarAppliedRequestId'].filter(key => typeof record[key] === 'string').map(key => [key, record[key]])) };
@@ -46,8 +49,10 @@ export function teamEditDrafts(value: unknown): Record<string, TeamEditDraft> | 
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
+    if (d.development !== undefined && !validDevelopmentBinding(d.development)) return;
     if (!string(d.name, 80) || !string(d.instructions, 16000) || !optional(d.id, 100) || !optional(d.topic, 4000) || !optional(d.policies, 16000) || !optional(d.leaderAgentId, 100) || !optional(d.projectBrief, 4000) || !optional(d.workspacePath, 4096) || !optional(d.requestId, 100) || (d.leaderMode !== undefined && d.leaderMode !== 'existing' && d.leaderMode !== 'automatic') || (d.autonomous !== undefined && typeof d.autonomous !== 'boolean') || !Array.isArray(d.memberAgentIds) || d.memberAgentIds.some(id => !string(id, 100)) || !string(record.expectedUpdatedAt, 40)) return;
     const draft: TeamDraft = { name: d.name, instructions: d.instructions, memberAgentIds: [...d.memberAgentIds] as string[], rounds: 1 };
+    if (validDevelopmentBinding(d.development)) draft.development = {mode: 'rabbit', connectionId: d.development.connectionId};
     if (typeof d.autonomous === 'boolean') draft.autonomous = d.autonomous;
     if (d.leaderMode === 'existing' || d.leaderMode === 'automatic') draft.leaderMode = d.leaderMode;
     for (const field of ['id', 'topic', 'policies', 'leaderAgentId', 'projectBrief', 'workspacePath', 'requestId'] as const) if (typeof d[field] === 'string') draft[field] = d[field];
@@ -148,7 +153,9 @@ export function policyEditDrafts(value: unknown): Record<string, PolicyEditDraft
     const rules = [];
     for (const rule of d.rules) {
       if (!object(rule) || !['routine', 'standard', 'complex'].includes(String(rule.taskKind)) || !Array.isArray(rule.keywords) || rule.keywords.length > 32 || rule.keywords.some(word => !string(word, 80)) || !Array.isArray(rule.connections) || rule.connections.length < 1 || rule.connections.length > 8 || rule.connections.some(route => !object(route) || !string(route.connectionId, 200) || !string(route.model, 200) || !optional(route.effort, 40))) return;
-      rules.push({ taskKind: rule.taskKind, keywords: [...rule.keywords], connections: rule.connections.map(route => ({ connectionId: route.connectionId, model: route.model, ...(route.effort ? { effort: route.effort } : {}) })) });
+      let efficiency;
+      try { if (rule.efficiency !== undefined) efficiency = normalizePolicyEfficiency(rule.efficiency); } catch { return; }
+      rules.push({ taskKind: rule.taskKind, keywords: [...rule.keywords], connections: rule.connections.map(route => ({ connectionId: route.connectionId, model: route.model, ...(route.effort ? { effort: route.effort } : {}) })), ...(efficiency ? { efficiency } : {}) });
     }
     result[key] = { draft: { ...(d.id ? { id: d.id } : {}), name: d.name, description: d.description, defaultTaskKind: d.defaultTaskKind, rules }, expectedUpdatedAt: record.expectedUpdatedAt, previewAgentId: record.previewAgentId, previewText: record.previewText } as PolicyEditDraft;
   }

@@ -57,7 +57,7 @@ test('real App cold mount preserves order through delayed failed IPC, retry, men
   await act(async () => pending.resolve(snapshot));
   assert.deepEqual(ids(app.container, 'team'), seed.teams); assert.deepEqual(ids(app.container, 'agent'), seed.agents); assert.equal(disk.writes.length, 0);
   await act(async () => app.container.querySelector('[data-sidebar-id="design"] .sidebar-profile-button').dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2 })));
-  await click(button(app.container.querySelector('[role="dialog"]'), '목록에서 앞으로'));
+  await click(button(app.container.querySelector('[role="menu"]'), '목록에서 앞으로'));
   const reordered = { ...seed, teams: ['review', 'design', 'product'] };
   assert.deepEqual(ids(app.container, 'team'), reordered.teams); assert.deepEqual(disk.order(), reordered); assert.equal(disk.writes.length, 1);
   await app.unmount(); pending = deferred();
@@ -105,7 +105,7 @@ test('real React handles an uncaptured drag whose move/up bubble from another ca
   await act(async () => handle.dispatchEvent(pointer('pointerup', 410, 189)));
   assert.equal(disk.writes.length, 1, 'React and document delivery cannot commit twice');
   await act(async () => handle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 })));
-  assert.equal(app.container.querySelector('[role="dialog"]'), null, 'the generated post-drag click must not open a menu');
+  assert.equal(app.container.querySelector('[role="menu"]'), null, 'the generated post-drag click must not open a menu');
   assert.equal([...app.container.querySelectorAll('header button')].some(node => node.textContent === '팀 설정'), false, 'drag must not open the team chat');
   assert.equal(app.container.querySelector('[data-sidebar-dragging]'), null); assert.equal(app.container.querySelector('[data-sidebar-drop-target]'), null);
 });

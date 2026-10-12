@@ -1,6 +1,6 @@
 {
   "name": "venditbot",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
   "type": "module",
   "description": "벤디트봇 — isolated personal macOS desktop for Claude, Codex and API providers",

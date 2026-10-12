@@ -20,7 +20,8 @@ export function resolveAgentPolicy(options: ResolveAgentPolicyOptions): AgentPol
   const policy = normalizeAgentPolicy(options.policy);
   const original = normalizePolicyConnections(options.originalConnections);
   const classification = classifyPolicyTask(policy, options.text, options.taskKind);
-  const metadata = {...classification, policyId: policy.id, policyName: policy.name, policyUpdatedAt: policy.updatedAt};
+  const rule = policy.rules.find(rule => rule.taskKind === classification.taskKind)!;
+  const metadata = {...classification, policyId: policy.id, policyName: policy.name, policyUpdatedAt: policy.updatedAt, ...(rule.efficiency ? {efficiency: structuredClone(rule.efficiency)} : {})};
   const allowed = new Set(original.map(route => route.connectionId));
   const validate = (routes: readonly PolicyConnectionRoute[]): PolicyConnectionRoute[] => {
     const selected = normalizePolicyConnections(routes).map(route => {
@@ -35,10 +36,21 @@ export function resolveAgentPolicy(options: ResolveAgentPolicyOptions): AgentPol
     // a priority or execute the same effective route twice.
     return normalizePolicyConnections(selected);
   };
+  if (rule.efficiency) {
+    let configured: PolicyConnectionRoute[];
+    try { configured = validate(rule.connections); }
+    catch { throw new Error('절약 정책의 지정 모델·추론 수준을 현재 연결에서 확인할 수 없습니다. 정책을 수정하거나 연결을 확인하세요. 다른 모델로 자동 전환하지 않았습니다.'); }
+    if (options.explicitConnections !== undefined) {
+      const requested = validate(options.explicitConnections);
+      const keys = new Set(configured.map(route => JSON.stringify(route)));
+      if (requested.some(route => !keys.has(JSON.stringify(route)))) throw new Error('절약 정책에 지정한 연결·모델·추론 수준 안에서만 위임할 수 있습니다.');
+      return {...metadata, reason: `절약 정책의 지정 연결 안에서 명시한 순서 사용. ${classification.reason}`, connections: requested};
+    }
+    return {...metadata, connections: configured};
+  }
   if (options.explicitConnections !== undefined) {
     return {...metadata, reason: `명시한 연결 순서 우선. ${classification.reason}`, connections: validate(options.explicitConnections)};
   }
-  const rule = policy.rules.find(rule => rule.taskKind === classification.taskKind)!;
   try { return {...metadata, connections: validate(rule.connections)}; }
   catch { return {...metadata, connections: original, warning: fallbackWarning}; }
 }

@@ -1601,3 +1601,103 @@ test('Rabbit desktop late GET cannot verify a replacement key that was never che
   data.values[key] = f.port.safeStorage.encryptString('rabbit_' + 'z'.repeat(43)).toString('base64'); await writeFile(file, JSON.stringify(data), {mode: 0o600}); gate.resolve();
   const response = await pending; assert.equal(response.ok, false); assert.match(response.error, /키가 변경/); assert.equal((await f.call('state')).rabbitConnections[0].verified, false); assert.deepEqual(api.failures, []);
 });
+
+test('efficiency preset IPC uses authenticated catalog and bounded Codex history without expensive failure fallback',async t=>{
+ const f=await fixture(t,{codexRuntime:true});
+ const preset=await f.call('policyEfficiencyPreset',{preset:'status_check',connections:[{connectionId:'codex',model:'gpt-6-astra',effort:'high'}]});
+ assert.deepEqual(preset.connections,[{connectionId:'codex',model:'gpt-6-luna',effort:'low'}]);
+ const draft=modelPolicy('절약 실행');Object.assign(draft.rules[0],preset);
+ const policy=(await f.call('savePolicy',{policy:draft})).policies[0];
+ const agent=(await f.call('saveAgent',{agent:{name:'상태 담당',instructions:'ROLE_MARKER_AND_APPROVALS',connectionId:'codex',model:'gpt-6-astra',effort:'high',automation:{policyId:policy.id}}})).agents[0];
+ const session=await f.call('createSession',{agentId:agent.id});
+ for(const text of ['상태 확인 oldest','상태 확인 recent','상태 확인 current'])assert.equal((await runToEnd(f,session.id,text)).taskStatus,'completed');
+ const protocol=()=>readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8').then(text=>text.trim().split('\n').map(JSON.parse));
+ let calls=await protocol(),starts=calls.filter(call=>call.method==='thread/start'),injected=calls.filter(call=>call.method==='thread/inject_items');
+ assert.equal(starts.length,3);assert.ok(starts.every(call=>call.params.ephemeral===true&&call.params.baseInstructions.includes('ROLE_MARKER_AND_APPROVALS')));
+ assert.equal(injected.length,2);assert.match(JSON.stringify(injected.at(-1).params.items),/recent/);assert.doesNotMatch(JSON.stringify(injected.at(-1).params.items),/oldest/);
+ let saved=await f.session(session.id);assert.equal(saved.messages.length,6);assert.equal(saved.messages[0].text,'상태 확인 oldest');assert.equal(saved.messages.at(-1).routeSelection.efficiency.maxHistoryTurns,1);
+ const catalogFile=path.join(f.appRoot,'runtimes/codex/bin/models.json'),catalog=JSON.parse(await readFile(catalogFile,'utf8'));catalog.qaFailModels=['gpt-6-luna'];await writeFile(catalogFile,JSON.stringify(catalog));
+ saved=await runToEnd(f,session.id,'상태 확인 fail');assert.equal(saved.taskStatus,'failed');assert.deepEqual(saved.messages.at(-1).attempts.map(attempt=>attempt.model),['gpt-6-luna']);
+ calls=await protocol();assert.ok(calls.filter(call=>call.method==='turn/start').every(call=>call.params.model==='gpt-6-luna'&&call.params.effort==='low'));
+ const disk=JSON.parse(await readFile(path.join(f.profileRoot,'conversations.json'),'utf8'));assert.equal(disk.sessions.find(item=>item.id===session.id).messages.length,8);
+});
+
+test('efficiency Claude turns never resume hidden history and disabling savings restores full saved context',async t=>{
+ const f=await fixture(t,{claudeRuntime:true}),route={connectionId:'claude-code',model:'default',effort:'low'},draft=modelPolicy('짧은 Claude');
+ draft.rules=draft.rules.map(rule=>({...rule,connections:[route]}));draft.rules[0].efficiency={preset:'periodic_report',maxHistoryTurns:1,maxHistoryCharacters:4000};
+ const policy=(await f.call('savePolicy',{policy:draft})).policies[0];
+ const agent=(await f.call('saveAgent',{agent:{name:'보고 담당',instructions:'CLAUDE_ROLE_UNCHANGED',...route,automation:{policyId:policy.id}}})).agents[0],session=await f.call('createSession',{agentId:agent.id});
+ const readInput=async()=>JSON.parse(await readFile(path.join(f.profileRoot,'providers/claude/last-inference-input.json'),'utf8'));
+ for(const text of ['반복 oldest','반복 recent','반복 current']){const saved=await runToEnd(f,session.id,text);assert.equal(saved.taskStatus,'completed',saved.messages.at(-1)?.error);assert.equal(saved.providerSessionId,undefined);assert.equal((await readInput()).args.includes('--resume'),false);}
+ let input=await readInput(),context=JSON.parse(input.input.slice(input.input.indexOf('{')));assert.deepEqual(context.previousCompletedMessages.map(message=>message.content),['반복 recent','Claude OK']);assert.equal(context.currentUserMessage.content,'반복 current');assert.match(input.args[input.args.indexOf('--system-prompt')+1],/CLAUDE_ROLE_UNCHANGED/);
+ let saved=await f.session(session.id);assert.equal(saved.messages.length,6);assert.equal(saved.messages[0].text,'반복 oldest');
+ const updated=structuredClone(policy);delete updated.rules[0].efficiency;await f.call('savePolicy',{policy:updated,expectedUpdatedAt:policy.updatedAt});
+ saved=await runToEnd(f,session.id,'반복 unrestricted');assert.equal(saved.taskStatus,'completed');input=await readInput();assert.equal(input.args.includes('--resume'),false);context=JSON.parse(input.input.slice(input.input.indexOf('{')));assert.equal(context.previousCompletedMessages.length,6);assert.equal(context.previousCompletedMessages[0].content,'반복 oldest');assert.equal(saved.providerSessionId,'owned-claude-session');
+});
+
+test('bound PM session scopes Rabbit tools and refuses local writes even without a project keyword or after agent edits',async t=>{
+ const f=await fixture(t),api=await f.api(),{workspacePath}=await workspaceSession(f,api);await changeRules(f,{defaultMode:'allow'});
+ const selected=(await f.call('state')).profiles[0],a=await rabbitConfigured(f,api,{name:'Project A',enabledForAgents:true}),b=await rabbitConfigured(f,api,{name:'Project B',enabledForAgents:true});
+ const agent=(await f.call('saveAgent',{agent:{name:'PM',instructions:'Plan and report',connectionId:selected.id,model:selected.model,workspacePath,development:{mode:'rabbit',connectionId:a.id}}})).agents[0];
+ const session=await f.call('createSession',{agentId:agent.id});assert.deepEqual(session.development,{mode:'rabbit',connectionId:a.id});
+ const clone=(await f.call('cloneAgent',{id:agent.id,expectedUpdatedAt:agent.updatedAt})).agent;assert.deepEqual(clone.development,agent.development);assert.notEqual(clone.id,agent.id);
+ await f.call('saveAgent',{agent:{...agent,development:{mode:'rabbit',connectionId:b.id}}});assert.equal((await f.call('createSession',{agentId:agent.id})).development.connectionId,b.id);
+ api.enqueue(({body,response})=>{assert.match(JSON.stringify(body.messages),/대표 또는 PM/);teamTool(response,'list_project_connections',{},'bound-list')});
+ api.enqueue(({body,response})=>{const tool=JSON.stringify(body.messages.filter(message=>message.role==='tool'));assert.match(tool,new RegExp(a.id));assert.doesNotMatch(tool,new RegExp(b.id));finish(response,'Scoped list')});
+ assert.equal((await runToEnd(f,session.id,'목록 확인')).taskStatus,'completed');
+ const approvals=f.events.filter(event=>event.type==='tool-approval').length;
+ api.enqueue(({response})=>toolReply(response,'must-not-write.txt','blocked','bound-write'));
+ const blocked=await runToEnd(f,session.id,'이 파일을 작성하세요');assert.equal(blocked.messages.at(-1).tools[0].status,'failed');assert.match(blocked.messages.at(-1).tools[0].summary,/개발 실행 대상은 Rabbit/);assert.equal(f.events.filter(event=>event.type==='tool-approval').length,approvals);await assert.rejects(readFile(path.join(workspacePath,'must-not-write.txt')),{code:'ENOENT'});
+ api.enqueue(({response})=>teamTool(response,'start_project_run',{connectionId:b.id,input:rabbitInput('wrong project')},'foreign-run'));
+ const foreign=await runToEnd(f,session.id,'개발 요청');assert.equal(foreign.messages.at(-1).tools[0].status,'failed');assert.equal((await f.call('state')).rabbitRuns.length,0);assert.equal(api.requests.filter(request=>request.url.endsWith('/runs')).length,0);
+ const current=(await f.call('state')).rabbitConnections.find(item=>item.id===a.id);await f.call('deleteRabbitConnection',{id:a.id,expectedUpdatedAt:current.updatedAt});
+ api.enqueue(({response})=>toolReply(response,'unavailable.txt','still blocked','unavailable-write'));
+ const unavailable=await runToEnd(f,session.id,'연결 오류면 여기서 작성');assert.match(unavailable.messages.at(-1).tools[0].summary,/개발 실행 대상은 Rabbit/);await assert.rejects(readFile(path.join(workspacePath,'unavailable.txt')),{code:'ENOENT'});assert.deepEqual(api.failures,[]);
+});
+
+test('team binding overrides leader default and each captured child session stays scoped across teams',async t=>{
+ const f=await fixture(t),api=await f.api(),{workspacePath}=await workspaceSession(f,api);await changeRules(f,{defaultMode:'allow'});
+ const selected=(await f.call('state')).profiles[0],a=await rabbitConfigured(f,api,{name:'Team A',enabledForAgents:true}),b=await rabbitConfigured(f,api,{name:'Leader B',enabledForAgents:true});
+ const leader=(await f.call('saveAgent',{agent:{name:'Shared PM',instructions:'Plan and report',connectionId:selected.id,model:selected.model,workspacePath,development:{mode:'rabbit',connectionId:b.id}}})).agents[0];
+ const teamA=(await f.call('saveTeam',{team:{name:'A',instructions:'',topic:'',policies:'',leaderAgentId:leader.id,memberAgentIds:[leader.id],rounds:1,development:{mode:'rabbit',connectionId:a.id}}})).teams[0];
+ const teamB=(await f.call('saveTeam',{team:{name:'B',instructions:'',topic:'',policies:'',leaderAgentId:leader.id,memberAgentIds:[leader.id],rounds:1}})).teams.find(team=>team.id!==teamA.id);
+ const clone=(await f.call('cloneTeam',{id:teamA.id,expectedUpdatedAt:teamA.updatedAt})).team;assert.deepEqual(clone.development,teamA.development);assert.notEqual(clone.id,teamA.id);
+ for(const [team,expected] of [[teamA,a],[teamB,b]]){
+  api.enqueue(({response})=>toolReply(response,'team-blocked.txt','blocked',`team-write-${team.id}`));const end=f.event(event=>event.type==='run-end');
+  const run=await f.call('startTeamRun',{teamId:team.id,goal:'프로젝트 이름 없는 개발 요청'});assert.equal(run.development.connectionId,expected.id);
+  for(const step of run.steps)assert.equal((await f.session(step.sessionId)).development.connectionId,expected.id);
+  await end;await nextTurn();const session=await f.session(run.steps[0].sessionId);assert.match(session.messages.at(-1).tools[0].summary,/개발 실행 대상은 Rabbit/);
+ }
+ await assert.rejects(readFile(path.join(workspacePath,'team-blocked.txt')),{code:'ENOENT'});assert.deepEqual(api.failures,[]);
+});
+
+test('bound Rabbit connection identity cannot redirect saved sessions or teams before their first remote receipt',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:true,images:false,structuredOutput:false}});
+ const a=await rabbitConfigured(f,api,{name:'Agent project',enabledForAgents:true}),b=await rabbitConfigured(f,api,{name:'Team project',enabledForAgents:true});
+ let agent=(await f.call('saveAgent',{agent:{name:'PM',instructions:'Plan',connectionId:selected.id,model:selected.model,development:{mode:'rabbit',connectionId:a.id}}})).agents[0];
+ const credentials=path.join(f.profileRoot,'credentials.encrypted.json'),before=await readFile(credentials);
+ const rejectChange=async connection=>{for(const update of [{projectId:randomUUID()},{baseUrl:'https://different.example.com',allowInsecureLoopback:false}])await assert.rejects(f.call('saveRabbitConnection',{connection:{...connection,...update},expectedUpdatedAt:connection.updatedAt,apiKey:'rabbit_'+'s'.repeat(43)}),/개발 대상으로 참조/);};
+ await rejectChange(a);assert.deepEqual(await readFile(credentials),before);
+ const session=await f.call('createSession',{agentId:agent.id});
+ agent=(await f.call('saveAgent',{agent:{...agent,development:undefined}})).agents.find(item=>item.id===agent.id);
+ await rejectChange(a);assert.equal((await f.session(session.id)).development.connectionId,a.id);
+ await f.call('saveTeam',{team:{name:'Team',instructions:'',topic:'',policies:'',leaderAgentId:agent.id,memberAgentIds:[agent.id],rounds:1,development:{mode:'rabbit',connectionId:b.id}}});
+ await rejectChange(b);assert.equal((await f.call('state')).rabbitRuns.length,0);assert.deepEqual(await readFile(credentials),before);
+ const saved=await f.call('saveRabbitConnection',{connection:{...a,name:'Renamed project'},expectedUpdatedAt:a.updatedAt,apiKey:'rabbit_'+'r'.repeat(43)});
+ assert.equal(saved.rabbitConnections.find(item=>item.id===a.id).name,'Renamed project');assert.equal(saved.rabbitConnections.find(item=>item.id===a.id).projectId,a.projectId);
+ assert.deepEqual(api.failures,[]);
+});
+
+for(const kind of ['agent','automatic team'])test(`Rabbit target changes during ${kind} model discovery reject before any role or team is created`,async t=>{
+ const f=await fixture(t,{codexRuntime:true}),api=await f.api(),connection=await rabbitConfigured(f,api,{enabledForAgents:true});
+ const bin=path.join(f.appRoot,'runtimes','codex','bin','codex'),marker=path.join(f.profileRoot,'providers','codex','waiting-models'),release=path.join(f.profileRoot,'providers','codex','release-models');
+ let runtime=await readFile(bin,'utf8');runtime=runtime.replace("import {appendFileSync, readFileSync}","import {appendFileSync, readFileSync, existsSync, writeFileSync}");
+ runtime=runtime.replace("case 'model/list': reply(JSON.parse(readFileSync(catalogFile, 'utf8')).payload); break;", "case 'model/list': {writeFileSync(path.join(process.env.CODEX_HOME,'waiting-models'),'waiting'); const poll=()=>{if(!existsSync(path.join(process.env.CODEX_HOME,'release-models'))){setTimeout(poll,5);return;} reply(JSON.parse(readFileSync(catalogFile,'utf8')).payload);};poll();break;}");await writeFile(bin,runtime,{mode:0o700});
+ const pending=kind==='agent'?f.raw('saveAgent',{agent:{name:'New PM',instructions:'Plan',connectionId:'codex',model:'gpt-6-luna',development:{mode:'rabbit',connectionId:connection.id}}}):f.raw('saveTeam',{team:{leaderMode:'automatic',requestId:randomUUID(),name:'New team',projectBrief:'Plan development',instructions:'',policies:'',memberAgentIds:[],development:{mode:'rabbit',connectionId:connection.id}}});
+ try{
+  await deadline((async()=>{for(;;){try{await stat(marker);return;}catch{await new Promise(resolve=>setTimeout(resolve,5));}}})(),'catalog gate');
+  await f.call('saveRabbitConnection',{connection:{...connection,projectId:randomUUID()},expectedUpdatedAt:connection.updatedAt,apiKey:'rabbit_'+'m'.repeat(43)});
+ }finally{await writeFile(release,'release');}
+ const result=await pending;assert.equal(result.ok,false);assert.match(result.error,/개발 대상 Rabbit 연결이 변경/);
+ const state=await f.call('state');assert.equal(state.agents.length,0);assert.equal(state.teams.length,0);assert.equal(state.policies.length,0);assert.deepEqual(api.failures,[]);
+});
