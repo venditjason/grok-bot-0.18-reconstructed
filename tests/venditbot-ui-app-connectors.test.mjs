@@ -24,21 +24,21 @@ function fixture(overrides={}){
 
 test('connections require host state and never fabricate connected or tested state',async()=>{
  const f=fixture();assert.doesNotMatch(text(f.render()),/인증 연결됨|검사 · 통과/);assert.equal(f.calls.length,0);const tree=await f.load();assert.equal(f.calls[0][0],'appConnectorsList');
- for(const c of APP_CONNECTORS){const card=section(tree,c.id);assert.ok(card);assert.match(text(card),/설정 필요/);assert.equal(button(card,'공식 로그인으로 연결').props.disabled,true);assert.match(text(card),/검사 기록 없음/);}
+ for(const c of APP_CONNECTORS){const card=section(tree,c.id);assert.ok(card);assert.match(text(card),/연결 준비 중/);assert.equal(button(card,'연결'),undefined);assert.equal(input(card,`${c.label} 접근 범위 동의`),undefined);}
 });
 
-test('connect is explicit scope consent and invokes only host OAuth without client token arguments',async()=>{
- const f=fixture({gmail:{configured:true,status:'disconnected'}});let tree=await f.load(),card=section(tree,'gmail');assert.equal(button(card,'공식 로그인으로 연결').props.disabled,true);input(card,'Gmail 접근 범위 동의').props.onCheckedChange(true);tree=f.render();card=section(tree,'gmail');assert.equal(button(card,'공식 로그인으로 연결').props.disabled,false);button(card,'공식 로그인으로 연결').props.onPress();await tick();assert.deepEqual(f.calls.at(-1),['appConnectorsConnect',{id:'gmail',consentAccepted:true}]);assert.equal(f.calls.some(c=>/login|send|resume/i.test(c[0])&&!c[0].startsWith('appConnectors')),false);
+test('one direct connect click opens only host OAuth without checkbox or client token arguments',async()=>{
+ const f=fixture({gmail:{configured:true,status:'disconnected'}});const card=section(await f.load(),'gmail');assert.equal(input(card,'Gmail 접근 범위 동의'),undefined);assert.equal(button(card,'연결').props.disabled,false);button(card,'연결').props.onPress();await tick();assert.deepEqual(f.calls.at(-1),['appConnectorsConnect',{id:'gmail',consentAccepted:true}]);assert.equal(f.calls.some(c=>/login|send|resume/i.test(c[0])&&!c[0].startsWith('appConnectors')),false);
 });
 
 test('Docs/Sheets actual checks require a selected resource and success comes only from host test metadata',async()=>{
- const f=fixture({google_docs:{configured:true,status:'connected',hasCredential:true},google_sheets:{configured:true,status:'connected',hasCredential:true}});let tree=await f.load();for(const id of ['google_docs','google_sheets'])assert.equal(button(section(tree,id),'실제 연결 검사').props.disabled,true);
+ const f=fixture({google_docs:{configured:true,status:'connected',hasCredential:true},google_sheets:{configured:true,status:'connected',hasCredential:true}});let tree=await f.load();for(const id of ['google_docs','google_sheets'])assert.equal(button(section(tree,id),'연결 검사').props.disabled,true);
  input(section(tree,'google_docs'),'Google Docs 검사 대상 ID').props.onChange({target:{value:'chosen-document'}});f.setHandler(async(method)=>method==='appConnectorsTest'?f.values.map(c=>c.id==='google_docs'?{...c,lastTest:{ok:true,checkedAt:'2026-10-12T00:00:00.000Z',message:'문서 GET 확인',kind:'api_read'}}:c):f.values);
- button(section(f.render(),'google_docs'),'실제 연결 검사').props.onPress();await tick();assert.deepEqual(f.calls.at(-1),['appConnectorsTest',{id:'google_docs',resourceId:'chosen-document'}]);assert.match(text(section(f.render(),'google_docs')),/실제 검사 · 통과/);assert.doesNotMatch(text(section(f.render(),'google_sheets')),/실제 검사 · 통과/);
+ button(section(f.render(),'google_docs'),'연결 검사').props.onPress();await tick();assert.deepEqual(f.calls.at(-1),['appConnectorsTest',{id:'google_docs',resourceId:'chosen-document'}]);assert.match(text(section(f.render(),'google_docs')),/실제 읽기 확인 완료/);assert.doesNotMatch(text(section(f.render(),'google_sheets')),/실제 읽기 확인 완료/);
 });
 
 test('configuration secret stays in the explicit form, clears only after confirmed save, and blocks update through guard',async()=>{
- const f=fixture();button(section(await f.load(),'gmail'),'앱 등록 설정').props.onPress();let tree=f.render();input(tree,'앱 클라이언트 ID').props.onChange({target:{value:'client'}});input(tree,'앱 클라이언트 시크릿').props.onChange({target:{value:'secret-fixture'}});tree=f.render();assert.equal(input(tree,'앱 클라이언트 시크릿').props.type,'password');f.flushGuard();assert.equal(f.guards.at(-1).dirty,true);
+ const f=fixture();button(await f.load(),'Google 등록 설정').props.onPress();let tree=f.render();input(tree,'앱 클라이언트 ID').props.onChange({target:{value:'client'}});input(tree,'앱 클라이언트 시크릿').props.onChange({target:{value:'secret-fixture'}});tree=f.render();assert.equal(input(tree,'앱 클라이언트 시크릿').props.type,'password');f.flushGuard();assert.equal(f.guards.at(-1).dirty,true);
  f.setHandler(async()=>{throw Error('안전 저장소 잠김');});button(tree,'앱 등록 저장').props.onPress();await tick();assert.equal(input(f.render(),'앱 클라이언트 시크릿').props.value,'secret-fixture');assert.doesNotMatch(text(f.render()),/secret-fixture/);
  f.setHandler(async()=>f.values);button(f.render(),'앱 등록 저장').props.onPress();await tick();assert.equal(input(f.render(),'앱 클라이언트 시크릿'),undefined);assert.deepEqual(f.calls.at(-1),['appConnectorsConfigure',{provider:'google',clientId:'client',clientSecret:'secret-fixture'}]);
 });
@@ -52,7 +52,7 @@ test('unknown provider or duplicate host rows are refused without losing prior v
 });
 
 test('GitHub App selected repositories and OAuth public-only modes reach configure without broad repo scope',async()=>{
- const f=fixture();button(section(await f.load(),'github'),'앱 등록 설정').props.onPress();let tree=f.render();assert.equal(input(tree,'GitHub 앱 방식').props.value,'app');assert.match(text(tree),/비공개 저장소 접근은 앱 권한과 설치한 저장소/);
+ const f=fixture();button(await f.load(),'GitHub 등록 설정').props.onPress();let tree=f.render();assert.equal(input(tree,'GitHub 앱 방식').props.value,'app');assert.match(text(tree),/비공개 저장소 접근은 앱 권한과 설치한 저장소/);
  input(tree,'앱 클라이언트 ID').props.onChange({target:{value:'dedicated-client'}});input(tree,'앱 클라이언트 시크릿').props.onChange({target:{value:'dedicated-secret'}});button(f.render(),'앱 등록 저장').props.onPress();await tick();assert.deepEqual(f.calls.at(-1),['appConnectorsConfigure',{provider:'github',clientId:'dedicated-client',clientSecret:'dedicated-secret',githubApp:true}]);
- button(section(f.render(),'github'),'앱 등록 설정').props.onPress();tree=f.render();input(tree,'GitHub 앱 방식').props.onChange({target:{value:'oauth'}});assert.match(text(f.render()),/비공개 저장소 접근이나 저장소 쓰기 권한은 포함하지 않습니다/);
+ button(f.render(),'GitHub 등록 설정').props.onPress();tree=f.render();input(tree,'GitHub 앱 방식').props.onChange({target:{value:'oauth'}});assert.match(text(f.render()),/비공개 저장소 접근이나 저장소 쓰기 권한은 포함하지 않습니다/);
 });

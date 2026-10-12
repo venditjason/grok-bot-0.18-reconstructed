@@ -10,11 +10,13 @@ import { applyMacProductIdentity, verifyMacProductIdentity } from "./lib/macos-p
 import { signAppBundleAdHoc } from "./lib/codesign.mjs";
 import { capture, run } from "./lib/process.mjs";
 import { claimReleaseOutput } from './lib/venditbot-release-output.mjs';
+import {validateRendererAssets} from './lib/venditbot-renderer-assets.mjs';
 
 if (process.platform !== "darwin" || process.arch !== "arm64") throw new Error("VenditBot packaging requires native macOS arm64. Other targets have not been validated.");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const development = process.argv.includes("--development");
 const staged = path.join(root, ".build", "venditbot-app");
+const rendererSnapshot=await validateRendererAssets(path.join(staged,'renderer'));
 const runtime = path.join(root, "node_modules", "electron", "dist", "Electron.app");
 const version = JSON.parse(await readFile(path.join(staged, "package.json"), "utf8")).version;
 if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Invalid staged version.");
@@ -73,6 +75,7 @@ if (codexPackage.version !== "0.162.1") throw new Error("Update the pinned Codex
 const stagedPackage = JSON.parse(await readFile(path.join(archiveStage, "package.json"), "utf8"));
 if (typeof stagedPackage.version !== "string" || !/^\d+\.\d+\.\d+$/.test(stagedPackage.version)) throw new Error("A numeric three-part VenditBot application version is required.");
 await writeFile(path.join(archiveStage, "package.json"), `${JSON.stringify({ ...stagedPackage, name: "venditbot", productName: PRODUCT_IDENTITY.displayName, venditbotDevelopment: development }, null, 2)}\n`);
+await validateRendererAssets(path.join(archiveStage,'renderer'),rendererSnapshot);
 await createPackageWithOptions(archiveStage, path.join(resources, "app.asar"), { unpack: "**/*.node" });
 await applyMacProductIdentity(temporary, { development });
 await run('/usr/bin/plutil', ['-replace', 'CFBundleIconFile', '-string', 'venditbot.icns', path.join(temporary, 'Contents', 'Info.plist')]);

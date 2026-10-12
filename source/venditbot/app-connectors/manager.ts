@@ -1,17 +1,21 @@
 import {randomUUID} from 'node:crypto';
-import {APP_CONNECTORS,appConnectorDefinition,appConnectorId,appConnectorProvider,type AppId,type AppConnectorProvider,type AppConnectorView,type AppConnectorTest,type ConfigureAppConnectorInput,type ConnectAppConnectorInput,type AppConnectorInput,type TestAppConnectorInput} from '../../shared/app-connectors.js';
+import {APP_CONNECTORS,appConnectorDefinition,appConnectorId,appConnectorProvider,type AppId,type AppConnectorProvider,type AppConnectorView,type AppConnectorTest,type ConfigureAppConnectorInput,type ConnectAppConnectorInput,type AppConnectorInput,type TestAppConnectorInput,type AppConnectorPhase,type AppDeviceAuthorization} from '../../shared/app-connectors.js';
 import type {EncryptedSecretStore} from '../local-store.js';
 import {AppConnectorStore} from './store.js';
 import {ConnectorError,abort,discover,fail,jsonRequest,oauthCallback,publicError,record,text,trustedUrl,type FetchPort,type OAuthMetadata} from './protocol.js';
 import {ReadOnlyMcp} from './mcp.js';
 import {GOOGLE_OPERATIONS,googleRead,googleTest} from './google.js';
-type ClientConfig={provider:AppConnectorProvider;clientId:string;clientSecret?:string;appId?:string;githubApp?:boolean};
+import {managedAppRegistrations,type ManagedAppRegistration} from './registrations.js';
+import {githubDeviceAuthorization,type DeviceWait} from './device.js';
+type ClientConfig={provider:AppConnectorProvider;clientId:string;clientSecret?:string;appId?:string;githubApp?:boolean;flow?:'device'};
 type StoredToken={id:AppId;provider:AppConnectorProvider;accessToken:string;refreshToken?:string;expiresAt?:number;scopes:string[];config:ClientConfig;metadata:OAuthMetadata};
 type Secrets=Pick<EncryptedSecretStore,'has'|'read'|'write'|'remove'|'revision'>;
-export type AppConnectorOptions={root:string;secrets:Secrets;openExternal:(url:string)=>Promise<unknown>;changed:()=>void;assertMutable:(ownSecretMutation?:boolean)=>void;fetch?:FetchPort};
+export type AppConnectorOptions={root:string;secrets:Secrets;openExternal:(url:string)=>Promise<unknown>;changed:()=>void;assertMutable:(ownSecretMutation?:boolean)=>void;fetch?:FetchPort;registrations?:readonly ManagedAppRegistration[];deviceWait?:DeviceWait};
 export type AppReadInput={id:AppId;operation:string;args?:Record<string,unknown>};
 const configKey=(provider:AppConnectorProvider)=>`VENDITBOT_APPS_CONFIG_${provider.toUpperCase()}`;
 const tokenKey=(id:AppId)=>`VENDITBOT_APPS_TOKEN_${id.toUpperCase()}`;
+const phases:Record<AppConnectorPhase,string>={discovering:'공식 로그인 서버를 확인하고 있습니다.',registering:'공식 서버에 앱 연결을 준비하고 있습니다.',opening_browser:'기본 브라우저에서 공식 로그인을 열고 있습니다.',awaiting_consent:'브라우저에서 로그인과 연결 승인을 완료하세요.',exchanging_token:'공식 로그인 응답을 확인하고 있습니다.',saving_credential:'이 기기에 연결을 안전하게 저장하고 있습니다.',checking_connection:'공식 서버 연결을 검사하고 있습니다.'};
+const unavailable='벤디트봇 전용 앱 연결을 준비하고 있습니다. 현재 배포에는 공급자 등록이 없어 로그인할 수 없습니다. 앱 업데이트 후 다시 확인하세요.';
 const setup:Record<AppConnectorProvider,string>={
   google:'Google Cloud에서 Desktop app OAuth 클라이언트를 등록하고 사용할 API를 켜세요. 테스트 사용자와 동의 화면 설정이 필요할 수 있습니다.',
   notion:'공식 Notion MCP가 이 앱을 동적으로 등록합니다. 브라우저에서 작업공간과 권한을 확인한 뒤 승인하세요.',
@@ -29,16 +33,25 @@ function configuration(raw:unknown):ClientConfig{
 }
 /** Owns a single pending operation to avoid overlapping native secure-storage and token rotation. */
 export class AppConnectorManager {
-  private readonly store:AppConnectorStore;private readonly fetcher:FetchPort;
-  private pending:{id:AppId;status:'authorizing'|'verifying';controller:AbortController;done:Promise<unknown>}|undefined;
+  private readonly store:AppConnectorStore;private readonly fetcher:FetchPort;private readonly registrations:ReadonlyMap<AppConnectorProvider,ManagedAppRegistration>;
+  private pending:{id:AppId;status:'authorizing'|'verifying';controller:AbortController;done:Promise<unknown>;phase?:AppConnectorPhase;deviceAuthorization?:AppDeviceAuthorization}|undefined;
   private readonly errors=new Map<AppId,string>();
-  constructor(private readonly options:AppConnectorOptions){this.store=new AppConnectorStore(options.root);this.fetcher=options.fetch??fetch;}
+  constructor(private readonly options:AppConnectorOptions){this.store=new AppConnectorStore(options.root);this.fetcher=options.fetch??fetch;this.registrations=managedAppRegistrations(options.registrations);}
   list():AppConnectorView[]{const metadata=this.store.snapshot();return APP_CONNECTORS.map(definition=>{
-    const id=definition.id,configured=definition.provider==='notion'||this.options.secrets.has(configKey(definition.provider)),hasCredential=this.options.secrets.has(tokenKey(id)),saved=metadata.apps[id],error=this.errors.get(id),githubApp=definition.provider==='github'&&metadata.providers.github?.githubApp===true;
-    return {...structuredClone(definition),...(githubApp?{githubApp:true,scopes:[],description:'선택한 저장소에 설치된 전용 GitHub App의 읽기 권한을 사용합니다. 앱 연결 검사는 MCP 도구 목록만 확인하며 저장소 조회 성공과는 별개입니다.'}:{}),configured,hasCredential,
-      status:this.pending?.id===id?this.pending.status:!configured?'setup_required':error||saved?.requiresReconnect?'error':hasCredential?'connected':'disconnected',
-      setupMessage:setup[definition.provider],...(error?{error}:saved?.requiresReconnect?{error:'토큰 갱신 결과를 확인할 수 없어 재연결이 필요합니다. 자동 재시도하지 않습니다.'}:{}),...(saved?.lastTest?{lastTest:saved.lastTest}:{})};
+    const id=definition.id,custom=this.options.secrets.has(configKey(definition.provider)),managed=this.registrations.get(definition.provider),configured=definition.provider==='notion'||custom||!!managed,hasCredential=this.options.secrets.has(tokenKey(id)),saved=metadata.apps[id],error=this.errors.get(id),githubApp=definition.provider==='github'&&(custom?metadata.providers.github?.githubApp===true:managed?.provider==='github'&&managed.githubApp),pending=this.pending?.id===id?this.pending:undefined;
+    const registration=definition.provider==='notion'?'dynamic':custom?'custom':managed?'managed':'unavailable';
+    return {...structuredClone(definition),...(githubApp?{githubApp:true,scopes:[],description:'선택한 저장소에 설치된 전용 GitHub App의 읽기 권한을 사용합니다. 앱 연결 검사는 MCP 도구 목록만 확인하며 저장소 조회 성공과는 별개입니다.'}:{}),configured,hasCredential,registration,
+      status:pending?pending.status:error||saved?.requiresReconnect?'error':hasCredential?'connected':!configured?'setup_required':'disconnected',
+      setupMessage:!configured?unavailable:registration==='managed'?'공식 로그인에서 계정과 요청 권한을 확인한 뒤 승인하세요.':setup[definition.provider],
+      ...(pending?.phase?{phase:pending.phase,phaseMessage:phases[pending.phase]}:{}),...(pending?.deviceAuthorization?{deviceAuthorization:{...pending.deviceAuthorization}}:{}),
+      ...(error?{error}:saved?.requiresReconnect?{error:'토큰 갱신 결과를 확인할 수 없어 재연결이 필요합니다. 자동 재시도하지 않습니다.'}:{}),...(saved?.lastTest?{lastTest:saved.lastTest}:{})};
   });}
+  private phase(id:AppId,phase:AppConnectorPhase,deviceAuthorization?:AppDeviceAuthorization):void{if(this.pending?.id!==id)return;this.pending.phase=phase;if(deviceAuthorization)this.pending.deviceAuthorization={...deviceAuthorization};this.notify();}
+  private async client(provider:AppConnectorProvider,signal:AbortSignal):Promise<ClientConfig>{
+    if(this.options.secrets.has(configKey(provider))){const raw=await this.options.secrets.read(configKey(provider),signal);if(!raw)fail('앱 등록이 변경되었습니다. 다시 연결하세요.');const value=configuration(JSON.parse(raw!));if(value.provider!==provider)fail('앱 등록 공급자가 일치하지 않습니다.');return value;}
+    const managed=this.registrations.get(provider);if(!managed)fail(unavailable);
+    return {provider,clientId:managed.clientId,...(managed.provider==='slack'?{appId:managed.appId}:{}),...(managed.provider==='github'?{githubApp:managed.githubApp,flow:'device' as const}:{})};
+  }
   isBusy():boolean{return !!this.pending;}
   /** Stable for one OAuth grant, including token refresh; changes when the account is reconnected. Host only. */
   grantRevision(id:AppId):string|undefined{return this.options.secrets.has(tokenKey(appConnectorId(id)))?this.store.snapshot().apps[id]?.grantId:undefined;}
@@ -46,8 +59,8 @@ export class AppConnectorManager {
   private notify():void{try{this.options.changed();}catch{/* Observers cannot alter credential commits. */}}
   private operation<T>(id:AppId,status:'authorizing'|'verifying',fn:(signal:AbortSignal)=>Promise<T>,external?:AbortSignal):Promise<T>{
     this.idle();const controller=new AbortController(),forward=()=>controller.abort();external?.addEventListener('abort',forward,{once:true});if(external?.aborted)forward();
-    const done=Promise.resolve().then(()=>{abort(controller.signal);return fn(controller.signal);}).catch(error=>{const message=publicError(error);if(!controller.signal.aborted)this.errors.set(id,message);throw new ConnectorError(message);}).finally(()=>{external?.removeEventListener('abort',forward);this.pending=undefined;this.notify();});
-    this.pending={id,status,controller,done};this.notify();return done;
+    const done=Promise.resolve().then(()=>{abort(controller.signal);return fn(controller.signal);}).catch(error=>{const detail=publicError(error),phase=this.pending?.id===id?this.pending.phase:undefined;const message=phase?`${phases[phase]} ${detail}`:detail;if(!controller.signal.aborted)this.errors.set(id,message);throw new ConnectorError(message);}).finally(()=>{external?.removeEventListener('abort',forward);this.pending=undefined;this.notify();});
+    this.pending={id,status,controller,done,...(status==='verifying'?{phase:'checking_connection' as const}:{})};this.notify();return done;
   }
   async configure(input:ConfigureAppConnectorInput):Promise<AppConnectorView[]>{
     this.idle();const config=configuration(input),ids=APP_CONNECTORS.filter(item=>item.provider===config.provider).map(item=>item.id);
@@ -55,26 +68,37 @@ export class AppConnectorManager {
     await this.operation(ids[0]!,'verifying',async signal=>{await this.options.secrets.write(configKey(config.provider),JSON.stringify(config),{signal,beforeCommit:()=>{abort(signal);this.options.assertMutable(true);},afterCommit:()=>this.store.update(draft=>{draft.providers[config.provider]=config.githubApp===undefined?{}:{githubApp:config.githubApp};})});for(const id of ids)this.errors.delete(id);});return this.list();
   }
   async connect(input:ConnectAppConnectorInput):Promise<AppConnectorView[]>{
-    const id=appConnectorId(input.id);if(input.consentAccepted!==true)fail('요청 권한을 확인하고 연결 동의에 표시하세요.');
-    const definition=appConnectorDefinition(id);if(definition.provider!=='notion'&&!this.options.secrets.has(configKey(definition.provider)))fail(setup[definition.provider]);
+    const id=appConnectorId(input.id);if(input.consentAccepted!==true)fail('공식 로그인으로 연결하려면 연결 버튼을 눌러 동의하세요.');
+    const definition=appConnectorDefinition(id);if(definition.provider!=='notion'&&!this.options.secrets.has(configKey(definition.provider))&&!this.registrations.has(definition.provider))fail(`${unavailable} ${definition.provider==='github'?'전용 등록이 필요합니다.':''}`);
     // Start in background; the renderer can cancel or close its dialog without retaining an OAuth URL/token.
     void this.operation(id,'authorizing',async signal=>{
-      this.errors.delete(id);const provider=definition.provider,metadata=await discover(this.fetcher,provider,signal),callback=await oauthCallback(provider,signal);
+      this.errors.delete(id);const provider=definition.provider;this.phase(id,'discovering');
+      const preset=provider==='notion'?undefined:await this.client(provider,signal);
+      if(provider==='github'&&preset?.flow==='device'){
+        const metadata:OAuthMetadata={issuer:'https://github.com',authorizationEndpoint:'https://github.com/login/device',tokenEndpoint:'https://github.com/login/oauth/access_token'},scopes=preset.githubApp?[]:definition.scopes;
+        this.phase(id,'opening_browser');
+        const response=await githubDeviceAuthorization({fetcher:this.fetcher,clientId:preset.clientId,scopes:preset.githubApp?['offline_access']:scopes,signal,openExternal:this.options.openExternal,progress:value=>this.phase(id,'awaiting_consent',value),...(this.options.deviceWait?{wait:this.options.deviceWait}:{})});
+        this.phase(id,'exchanging_token');const token=this.tokenResponse(id,preset,metadata,response,scopes);
+        const identity=await jsonRequest(this.fetcher,'github','https://api.github.com/user',{headers:{Authorization:`Bearer ${token.accessToken}`,Accept:'application/vnd.github+json'}},signal);
+        if(!Number.isSafeInteger(identity.id)||Number(identity.id)<1)fail('GitHub 계정 확인을 완료하지 못했습니다. 기존 연결은 유지됩니다.');
+        this.phase(id,'saving_credential');await this.saveToken(token,signal,true);this.errors.delete(id);return;
+      }
+      const metadata=await discover(this.fetcher,provider,signal),callback=await oauthCallback(provider,signal);
       try{
         let config:ClientConfig;
         if(provider==='notion'){
-          if(!metadata.registrationEndpoint)fail('Notion의 앱 등록 주소를 찾을 수 없습니다.');
+          this.phase(id,'registering');if(!metadata.registrationEndpoint)fail('Notion의 앱 등록 주소를 찾을 수 없습니다.');
           const registered=await jsonRequest(this.fetcher,provider,metadata.registrationEndpoint!,{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({client_name:'VenditBot',redirect_uris:[callback.redirectUri],grant_types:['authorization_code','refresh_token'],response_types:['code'],token_endpoint_auth_method:'none',scope:'default'})},signal);
           config={provider,clientId:text(registered.client_id,512)};if(registered.client_secret!==undefined)config.clientSecret=text(registered.client_secret,2048);
-        }else{const raw=await this.options.secrets.read(configKey(provider),signal);if(!raw)fail(setup[provider]);config=configuration(JSON.parse(raw!));if(config.provider!==provider)fail('앱 등록 공급자가 일치하지 않습니다.');}
+        }else{config=preset!;}
         abort(signal);const scopes=provider==='github'&&config.githubApp?[]:definition.scopes;
         const url=new URL(metadata.authorizationEndpoint);for(const [key,value]of Object.entries({client_id:config.clientId,redirect_uri:callback.redirectUri,response_type:'code',state:callback.state,code_challenge:callback.challenge,code_challenge_method:'S256'}))url.searchParams.set(key,value);
         if(scopes.length)url.searchParams.set('scope',scopes.join(provider==='slack'?',':' '));if(metadata.resource)url.searchParams.set('resource',metadata.resource);
         if(provider==='google'){url.searchParams.set('access_type','offline');url.searchParams.set('prompt','consent');}
-        await this.options.openExternal(url.href);const code=await callback.code;abort(signal);
+        this.phase(id,'opening_browser');try{await this.options.openExternal(url.href);}catch{fail('공식 로그인 브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인한 뒤 다시 연결하세요.');}this.phase(id,'awaiting_consent');const code=await callback.code;abort(signal);this.phase(id,'exchanging_token');
         const body=new URLSearchParams({grant_type:'authorization_code',client_id:config.clientId,redirect_uri:callback.redirectUri,code,code_verifier:callback.verifier});if(config.clientSecret&&provider!=='slack')body.set('client_secret',config.clientSecret);if(metadata.resource)body.set('resource',metadata.resource);
         const response=await jsonRequest(this.fetcher,provider,metadata.tokenEndpoint,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body},signal);
-        const token=this.tokenResponse(id,config,metadata,response,scopes);await this.saveToken(token,signal,true);this.errors.delete(id);
+        const token=this.tokenResponse(id,config,metadata,response,scopes);this.phase(id,'saving_credential');await this.saveToken(token,signal,true);this.errors.delete(id);
       }finally{callback.close();}
     }).catch(()=>{});return this.list();
   }

@@ -3,7 +3,7 @@ type Provider = keyof typeof MCP_ENDPOINTS;
 export type RemoteReadTool = {name:string;description?:string;inputSchema:Record<string,unknown>};
 /** Explicit allowlist: neither remote annotations nor names supplied by an LLM can grant write capability. */
 export const MCP_READ_ALLOWLIST:Record<Provider,readonly string[]>={
-  notion:['notion-search','notion-fetch','notion-get-users','notion-get-teams','notion-get-comments'],
+  notion:['notion-get-self','notion-search','notion-fetch','notion-get-users','notion-get-teams','notion-get-comments'],
   slack:['slack_search_public','slack_search_channels','slack_read_channel','slack_read_thread','slack_list_channel_members'],
   github:['get_me','search_repositories','search_code','get_file_contents','list_issues','issue_read','list_pull_requests','pull_request_read','search_issues','search_pull_requests'],
 };
