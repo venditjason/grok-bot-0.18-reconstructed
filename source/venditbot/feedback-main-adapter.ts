@@ -99,7 +99,10 @@ export class FeedbackMainAdapter {
   if(!session){const first=routes[0]!;session=this.options.sessions.create(first.connectionId,first.model,agent.workspacePath,first.effort,{connections:routes,agentId:agent.id,agentName:'리포트',instructions});session.title='리포트';this.options.sessions.save(session);}
   this.save({...this.configuration,agentId:agent.id,sessionId:session.id});return {agentId:agent.id,sessionId:session.id};
  }
- private objective(job:FeedbackRecord):string{return '[벤디트봇 리포트 '+job.id+'] '+job.title+'\n\n'+job.description+'\n\n대상 저장소: '+FEEDBACK_REPOSITORY+'. 요청 범위 안에서 구현하고 관련 테스트를 실행하세요. iOS 구현과 설치·이전 안내는 apps/ios/docs/development-instructions.md를 기준으로 apps/ios 안에서 작성하세요. 자격 증명과 사용자 파일을 수정하거나 출력하지 마세요. 테스트 증빙 없이 병합 완료를 주장하지 마세요.';}
+ private objective(job:FeedbackRecord):string{return '[벤디트봇 리포트 '+job.id+'] '+job.title+'\n\n'+job.description+'\n\n대상 저장소: '+FEEDBACK_REPOSITORY+'. 요청 범위 안에서 구현하고 관련 테스트를 실행하세요. 자격 증명과 사용자 파일을 수정하거나 출력하지 마세요. 테스트 증빙 없이 병합 완료를 주장하지 마세요.';}
+ /** Observation compatibility only: 0.4.2 appended this sentence to every request.
+  * Keep exact historical receipts readable, but never add it to a new submission. */
+ private legacyObjective(job:FeedbackRecord):string{return '[벤디트봇 리포트 '+job.id+'] '+job.title+'\n\n'+job.description+'\n\n대상 저장소: '+FEEDBACK_REPOSITORY+'. 요청 범위 안에서 구현하고 관련 테스트를 실행하세요. iOS 구현과 설치·이전 안내는 apps/ios/docs/development-instructions.md를 기준으로 apps/ios 안에서 작성하세요. 자격 증명과 사용자 파일을 수정하거나 출력하지 마세요. 테스트 증빙 없이 병합 완료를 주장하지 마세요.';}
  private async prepareRemote(job:FeedbackRecord){const b=this.checkedBinding(job);if(!b.rabbitConnectionId)return {ready:false,canFallback:true};
   const c=this.options.rabbitStore.getConnection(b.rabbitConnectionId);if(!c.enabledForAgents)return {ready:false,canFallback:false,message:'Rabbit 연결이 에이전트 실행을 허용하지 않습니다.'};
   try{const check=await this.options.rabbit.test(c,undefined,true),repository=check.repositories.find(r=>r.id===b.rabbitRepositoryId);
@@ -107,7 +110,7 @@ export class FeedbackMainAdapter {
    return {ready:true,canFallback:false};
   }catch{return {ready:false,canFallback:false,message:'Rabbit 저장소 조회 또는 승인을 확인하지 못했습니다. 아직 작업을 제출하지 않았습니다.'};}
  }
- private checkRemoteRecord(run:RabbitRunRecord,job:FeedbackRecord){const b=job.binding;if(!b||run.id!==job.id||run.connectionId!==b.rabbitConnectionId||run.request.repository_id!==b.rabbitRepositoryId||run.request.base_ref!==b.baseBranch||run.request.objective!==this.objective(job))throw new Error('리포트와 Rabbit 기록의 저장소 또는 요청이 다릅니다.');}
+ private checkRemoteRecord(run:RabbitRunRecord,job:FeedbackRecord){const b=job.binding;if(!b||run.id!==job.id||run.connectionId!==b.rabbitConnectionId||run.request.repository_id!==b.rabbitRepositoryId||run.request.base_ref!==b.baseBranch||![this.objective(job),this.legacyObjective(job)].includes(run.request.objective))throw new Error('리포트와 Rabbit 기록의 저장소 또는 요청이 다릅니다.');}
  private remoteReceipt(run:RabbitRunRecord,job:FeedbackRecord){this.checkRemoteRecord(run,job);return {recordId:run.id,state:run.receipt?'accepted' as const:run.unresolvedSubmission||['unknown','submitting'].includes(run.phase)?'unknown' as const:'rejected' as const,...(run.receipt?{runId:run.receipt.run_id}:{})};}
  private syncConversation(snapshot:FeedbackSnapshot){for(const job of snapshot.jobs){if(!job.sessionId||this.options.isSessionBusy?.(job.sessionId))continue;try{const s=this.options.sessions.get(job.sessionId);if(s.agentId!==job.agentId)continue;
   if(!s.messages.some(m=>m.id===job.id))s.messages.push({id:job.id,role:'user',text:job.title+'\n\n'+job.description,createdAt:job.createdAt,status:'completed'});

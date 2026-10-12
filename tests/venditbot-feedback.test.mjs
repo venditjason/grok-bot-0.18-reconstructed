@@ -53,7 +53,7 @@ test('real feedback adapter, RabbitHost, durable RabbitStore and HTTP client sub
  const root=mkdtempSync('/private/tmp/vendit-feedback-http-');t.after(()=>rmSync(root,{recursive:true,force:true}));
  const project=randomUUID(),remote=randomUUID(),request=input(),now=new Date().toISOString(),cursor=Buffer.from(remote+':0').toString('base64url');let post=0,gets=0;const original=globalThis.fetch;
  const transport=async(url,init)=>{const u=new URL(url);assert.equal(u.origin,'https://rabbit.example.test');assert.equal(init.redirect,'manual');assert.equal(init.headers['X-Project-API-Key'],'rabbit_'+'x'.repeat(43));let value;
-  if(init.method==='POST'){post++;assert.equal(u.pathname,`/v1/projects/${project}/runs`);const job=JSON.parse(readFileSync(join(root,'feedback-jobs.json'),'utf8')).jobs[0];assert.equal(job.dispatch,'remote_submitting');const records=JSON.parse(readFileSync(join(root,'rabbit-runs.json'),'utf8'));assert.ok(JSON.stringify(records).includes('submitting'));const body=JSON.parse(init.body);assert.equal(body.repository_id,repository);assert.equal(body.constraints.max_parallel_tasks,4);assert.match(body.objective,/apps\/ios\/docs\/development-instructions\.md/);value={run_id:remote,project_id:project,state:'queued',created_at:now,poll_url:`${u.origin}/v1/runs/${remote}`,events_url:`${u.origin}/v1/runs/${remote}/events`};}
+  if(init.method==='POST'){post++;assert.equal(u.pathname,`/v1/projects/${project}/runs`);const job=JSON.parse(readFileSync(join(root,'feedback-jobs.json'),'utf8')).jobs[0];assert.equal(job.dispatch,'remote_submitting');const records=JSON.parse(readFileSync(join(root,'rabbit-runs.json'),'utf8'));assert.ok(JSON.stringify(records).includes('submitting'));const body=JSON.parse(init.body);assert.equal(body.repository_id,repository);assert.equal(body.constraints.max_parallel_tasks,4);assert.doesNotMatch(body.objective,/apps\/ios|iOS 구현/);assert.ok(body.objective.includes(request.description));value={run_id:remote,project_id:project,state:'queued',created_at:now,poll_url:`${u.origin}/v1/runs/${remote}`,events_url:`${u.origin}/v1/runs/${remote}/events`};}
   else{gets++;if(u.pathname.endsWith('/repositories'))value={items:[{id:repository,provider:'github',url:'https://github.com/'+repo,default_branch:'main',status:'ready'}],has_more:false,next_cursor:null};else if(u.pathname.endsWith('/events'))value={items:[],next_cursor:cursor,has_more:false,run_revision:1};else value={run_id:remote,project_id:project,state:'running',objective:'synthetic',block_reason:null,manifest_ready:true,created_at:now,run_revision:1,event_cursor:cursor,last_event_id:null,max_parallel_tasks:1,timeout_seconds:3600,environment:'development'};}
   return new Response(JSON.stringify(value),{status:init.method==='POST'?202:200,headers:{'content-type':'application/json'}});
  };
@@ -74,4 +74,32 @@ test('completed remote task with unread result event pages keeps background obse
  const main=new FeedbackMainAdapter({root:f.root,agents,sessions,rabbitStore,rabbit,defaultRoute:()=>({connectionId:'ai',model:'model'}),assertMutable(){},changed(){},verifyRabbitMerge:async(job,run)=>{proofs++;assert.equal(feedbackGithubInput(job,run),undefined);return;}});
  main.saveConfiguration({repository:repo,baseBranch:'main',allowLocalFallback:false,rabbitConnectionId:c.id,rabbitRepositoryId:repository});const x=input();main.host.submit(x);await main.host.refresh(x.requestId);assert.equal(main.store.get(x.requestId).dispatch,'remote_accepted');await main.host.refresh(x.requestId);
  assert.equal(proofs,0,'Unread event pages must be drained before merge verification');assert.equal(main.store.get(x.requestId).dispatch,'remote_accepted');assert.equal(main.store.get(x.requestId).status,'running');
+});
+
+// The report's own immutable input, not an unrelated earlier task, controls scope.
+function objectiveFixture(t){
+ const root=mkdtempSync('/private/tmp/vendit-feedback-scope-');t.after(()=>rmSync(root,{recursive:true,force:true}));
+ const agents=new AgentStore(root),sessions=new LocalSessionStore(root),rabbitStore=new RabbitStore(root),project=randomUUID(),remote=randomUUID(),now=new Date().toISOString(),posted=[];let polls=0;
+ const connection=rabbitStore.saveConnection({name:'Self',baseUrl:'https://rabbit.example.test',projectId:project,baseRef:'main',workflowTemplate:'bugfix_pr',maxParallelTasks:1,timeoutSeconds:600,enabledForAgents:true});
+ const receipt=()=>({run_id:remote,project_id:project,state:'queued',created_at:now,poll_url:`https://rabbit.example.test/v1/runs/${remote}`,events_url:`https://rabbit.example.test/v1/runs/${remote}/events`});
+ const rabbit={test:async()=>({repositories:[{id:repository,url:'https://github.com/'+repo,status:'ready',default_branch:'main'}]}),start:async(id,body,requestId,source)=>{posted.push(structuredClone(body));const r=rabbitStore.prepareRun(id,body,requestId,source);rabbitStore.beginSubmission(r.id);return rabbitStore.completeSubmission(r.id,receipt());},refresh:async id=>{polls++;return rabbitStore.getRun(id);}};
+ const options={root,agents,sessions,rabbitStore,rabbit,defaultRoute:()=>({connectionId:'ai',model:'model'}),assertMutable(){},changed(){}};
+ const main=new FeedbackMainAdapter(options),remoteBinding={repository:repo,baseBranch:'main',allowLocalFallback:false,rabbitConnectionId:connection.id,rabbitRepositoryId:repository};main.saveConfiguration(remoteBinding);
+ return {root,main,options,rabbitStore,connection,remoteBinding,remote,receipt,posted,polls:()=>polls};
+}
+test('generic bug and feature reports never inherit iOS development instructions',async t=>{
+ const f=objectiveFixture(t);for(const kind of ['bug','request']){const x={...input(),kind,title:'Rabbit 상태 표시 수정',description:'프로젝트 상태 표시의 회귀 테스트를 추가해 주세요.'};f.main.host.submit(x);await f.main.host.refresh(x.requestId);const body=f.posted.at(-1);assert.ok(body.objective.includes(x.description));assert.doesNotMatch(body.objective,/iOS|아이폰|apps\/ios/);assert.equal(f.main.store.get(x.requestId).dispatch,'remote_accepted');}
+ assert.equal(f.posted.length,2);
+});
+test('an explicit iOS report keeps its own specification once, without global scope injection',async t=>{
+ const f=objectiveFixture(t),x={...input(),kind:'request',title:'아이폰 요청',description:'apps/ios/docs/development-instructions.md와 승인된 지시서 해시에 따라 진행하세요.'};f.main.host.submit(x);await f.main.host.refresh(x.requestId);
+ const text=f.posted[0].objective;assert.ok(text.includes(x.description));assert.equal(text.match(/apps\/ios\/docs\/development-instructions\.md/g).length,1);assert.doesNotMatch(text,/iOS 구현과 설치·이전 안내는/);
+});
+test('exact historical 0.4.2 objective still polls; altered historical scope is refused without replay',async t=>{
+ for(const mutation of ['none','altered']){const f=objectiveFixture(t),x=input(),agent=f.main.host.openAgent();let job=f.main.store.create(x,f.remoteBinding);
+ const objective='[벤디트봇 리포트 '+job.id+'] '+job.title+'\n\n'+job.description+'\n\n대상 저장소: '+repo+'. 요청 범위 안에서 구현하고 관련 테스트를 실행하세요. iOS 구현과 설치·이전 안내는 apps/ios/docs/development-instructions.md를 기준으로 apps/ios 안에서 작성하세요. 자격 증명과 사용자 파일을 수정하거나 출력하지 마세요. 테스트 증빙 없이 병합 완료를 주장하지 마세요.'+(mutation==='altered'?' unrelated instruction':'');
+ const body={objective,repository_id:repository,base_ref:'main',workflow_template:'bugfix_pr',acceptance_criteria:['관련 테스트를 통과한다.'],attachments:[],constraints:{environment:'development',max_parallel_tasks:4,timeout_seconds:3600,api_cost_limit_usd:0}};
+ const record=f.rabbitStore.prepareRun(f.connection.id,body,job.id,{sessionId:agent.sessionId,agentId:agent.agentId});f.rabbitStore.beginSubmission(record.id);f.rabbitStore.completeSubmission(record.id,f.receipt());job=f.main.store.update(job.id,job.revision,{...agent,route:'rabbit',dispatch:'remote_accepted',status:'running',remoteRunId:f.remote});
+ const before=readFileSync(join(f.root,'rabbit-runs.json'),'utf8');const restarted=new FeedbackMainAdapter(f.options);await restarted.host.refresh(job.id);restarted.host.submit(x);await restarted.host.refresh(job.id);
+ assert.equal(f.posted.length,0);assert.equal(readFileSync(join(f.root,'rabbit-runs.json'),'utf8'),before);assert.equal(f.polls()>0,mutation==='none');assert.equal(restarted.store.get(job.id).status,mutation==='none'?'running':'blocked');}
 });
