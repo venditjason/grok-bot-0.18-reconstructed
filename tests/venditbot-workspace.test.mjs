@@ -92,10 +92,52 @@ test('write approval is invalidated by content, inode, permissions or parent rep
       if (kind === 'parent') { await rename(directory, `${directory}-old`); await mkdir(directory); await writeFile(target, 'original'); }
       return true;
     });
+    await executor.execute('read_file', {path: `${kind}/file.txt`}, `read-${kind}`);
     await assert.rejects(executor.execute('write_file', {path: `${kind}/file.txt`, content: 'tool write'}, kind), /변경/);
     assert.notEqual(await readFile(target, 'utf8'), 'tool write');
   }
   assert.ok((await readdir(root, {recursive: true})).every(file => !file.includes('.venditbot-')));
+});
+
+test('development overwrites require a successful whole-file read in this executor, not search or prior turns', async t => {
+  const root=await temporary(t),file=path.join(root,'existing.txt');await writeFile(file,'original needle');let writes=0;
+  const executor=new WorkspaceExecutor(root,async()=>{writes++;return true;});
+  await assert.rejects(executor.execute('write_file',{path:'existing.txt',content:'unread'},'unread'),/read_file/);
+  await executor.execute('search_files',{path:'.',query:'needle'},'search');
+  await assert.rejects(executor.execute('write_file',{path:'existing.txt',content:'snippet'},'snippet'),/read_file/);
+  assert.equal(writes,0);assert.equal(await readFile(file,'utf8'),'original needle');
+  await executor.execute('read_file',{path:'existing.txt'},'read');
+  assert.equal((await executor.execute('write_file',{path:'existing.txt',content:'first approved'},'first')).written,true);
+  await assert.rejects(executor.execute('write_file',{path:'existing.txt',content:'second unread'},'second'),/read_file/);
+  await executor.execute('read_file',{path:'existing.txt'},'read'); // replayed old content is not a fresh observation
+  await assert.rejects(executor.execute('write_file',{path:'existing.txt',content:'cached read'},'cached'),/read_file/);
+  await executor.execute('read_file',{path:'existing.txt'},'fresh');
+  assert.equal((await executor.execute('write_file',{path:'existing.txt',content:'second approved'},'next')).written,true);
+  const nextTurnExecutor=new WorkspaceExecutor(root,async()=>true);
+  await assert.rejects(nextTurnExecutor.execute('write_file',{path:'existing.txt',content:'previous turn'},'old-turn'),/read_file/);
+  assert.equal(await readFile(file,'utf8'),'second approved');assert.equal(writes,2);
+});
+
+test('read evidence is invalidated by edits, inode replacement or mode changes before write authorization',async t=>{
+  for(const kind of ['content','inode','mode']){
+    const root=await temporary(t),file=path.join(root,'file.txt');await writeFile(file,'original');let approvals=0;const executor=new WorkspaceExecutor(root,async()=>{approvals++;return true;});
+    await executor.execute('read_file',{path:'file.txt'},'read');
+    if(kind==='content')await writeFile(file,'other work');
+    if(kind==='inode'){await rename(file,path.join(root,'kept.txt'));await writeFile(file,'original');}
+    if(kind==='mode')await chmod(file,0o600);
+    await assert.rejects(executor.execute('write_file',{path:'file.txt',content:'overwrite'},'write'),/읽은 뒤 파일이 변경/);assert.equal(approvals,0);
+    await executor.execute('read_file',{path:'file.txt'},'fresh');assert.equal((await executor.execute('write_file',{path:'file.txt',content:'reviewed'},'retry')).written,true);
+  }
+});
+
+test('denied reads never seed overwrite authorization and read-approval races preserve the observed version',async t=>{
+  const root=await temporary(t),file=path.join(root,'file.txt');await writeFile(file,'original');
+  const denied=new WorkspaceExecutor(root,async()=>true,undefined,async request=>request.operation!=='read');
+  await assert.rejects(denied.execute('read_file',{path:'file.txt'},'read'),/읽기/);
+  await assert.rejects(denied.execute('write_file',{path:'file.txt',content:'unread'},'write'),/read_file/);
+  const raced=new WorkspaceExecutor(root,async()=>true,undefined,async request=>{if(request.operation==='read')await writeFile(file,'changed while read approved');return true;});
+  const result=await raced.execute('read_file',{path:'file.txt'},'read');assert.equal(result.content,'original');
+  await assert.rejects(raced.execute('write_file',{path:'file.txt',content:'overwrite'},'write'),/읽은 뒤 파일이 변경/);assert.equal(await readFile(file,'utf8'),'changed while read approved');
 });
 
 test('tool queue serializes distinct approvals and aborts pending approval without a later write', async t => {

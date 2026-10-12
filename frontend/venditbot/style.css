@@ -291,3 +291,9 @@ nav[data-sidebar-dragging="true"] .agent-photo-tile:hover { transform: none; }
 .attachment-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px;min-width:0;font-size:12px}
 .chat-attachment>span:not(.attachment-name),.chat-attachment>button{flex-shrink:0}
 .attachment-error{margin:6px;overflow-wrap:anywhere}
+
+.chat-turns { margin: 0 0 12px; padding: 12px; border: 1px solid var(--border-gray-subtle, #d9d9df); border-radius: 12px; max-height: 280px; overflow: auto; }
+.chat-turns ol { margin: 8px 0 0; padding-left: 22px; }
+.chat-turns li { padding: 6px 0; }
+.chat-turn-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.chat-turn-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 4px 0; }

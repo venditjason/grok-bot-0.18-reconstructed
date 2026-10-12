@@ -35,11 +35,11 @@ test('agent sidebar immediately opens its latest ordinary chat, keeps drafts, an
   assert.ok(button(tree, '에이전트 설정')); assert.equal(component(tree, 'TeamChat'), undefined);
   composer(tree).onChange('일반 대화에서 계속'); tree = render();
   const calls = []; invoke = async (method, args) => { calls.push([method, args]); return method === 'createSession' ? session('created') : {}; };
-  composer(tree).onSend(); await tick(); assert.deepEqual(calls, [['send', { sessionId: 'normal', text: '일반 대화에서 계속' }]]);
+  composer(tree).onSend(); await tick(); assert.match(calls[0][1].requestId, /^[0-9a-f-]{36}$/); assert.deepEqual(calls, [['send', { requestId: calls[0][1].requestId, sessionId: 'normal', text: '일반 대화에서 계속' }]]);
   tree = render(); button(elements(tree).find(node => node.type === 'header'), '새 대화').props.onPress(); tree = render();
   assert.equal(calls.length, 1);
   composer(tree).onChange('첫 요청'); tree = render(); composer(tree).onSend(); await tick();
-  assert.deepEqual(calls.slice(1), [['createSession', { agentId: agent.id }], ['send', { sessionId: 'created', text: '첫 요청' }]]);
+  assert.deepEqual(calls.slice(1), [['createSession', { agentId: agent.id }], ['send', { requestId: calls[2][1].requestId, sessionId: 'created', text: '첫 요청' }]]);
 });
 
 test('team sidebar opens chat and completed follow-up sends contextRunId; new chat omits it', async () => {
@@ -377,5 +377,18 @@ test('a picker completing after first-session promotion never aliases a later ne
  finishCreate(session('created'));await tick();tree=render();button(elements(tree).find(n=>n.type==='header'),'새 대화').props.onPress();tree=render();assert.deepEqual(attachmentList(tree).props.files,[]);
  finishPicker([appAttachmentB]);await tick();tree=render();assert.deepEqual(attachmentList(tree).props.files,[]);composer(tree).onChooseAttachments();await tick();tree=render();assert.deepEqual(attachmentList(tree).props.files,[later]);
  const stored=JSON.parse(window.localStorage.getItem('venditbot.drafts.v1.chat-attachments'));assert.deepEqual(stored['session:created'],[appAttachmentB]);assert.deepEqual(stored['agent:agent'],[later]);
- navClick(tree,'에이전트 목록',agent.name);tree=render();assert.deepEqual(attachmentList(tree).props.files,[appAttachmentB]);assert.deepEqual(calls.find(c=>c[0]==='send'),['send',{sessionId:'created',text:'first without attachments'}]);
+ navClick(tree,'에이전트 목록',agent.name);tree=render();assert.deepEqual(attachmentList(tree).props.files,[appAttachmentB]);assert.deepEqual(calls.find(c=>c[0]==='send'),['send',{requestId:calls.find(c=>c[0]==='send')[1].requestId,sessionId:'created',text:'first without attachments'}]);
+});
+
+test('active conversation accepts consecutive messages without cancelling its response and preserves later edits until acknowledgement',async()=>{
+ const render=fixture({...state,sessions:[session('active')],queue:{running:['active'],queued:[]},activeRun:{sessionId:'active'}},memoryStorage(),{initialSessionId:'active',initialAgentId:agent.id}),calls=[];let release;
+ invoke=async(method,args)=>{calls.push([method,args]);if(method==='send'&&calls.length===1)return new Promise(done=>{release=done;});return {};};
+ let tree=render();assert.equal(composer(tree).queueWhileRunning,true);assert.equal(typeof composer(tree).onCancel,'function');composer(tree).onChange('첫 다음 메시지');tree=render();composer(tree).onSend();await tick();
+ tree=render();composer(tree).onChange('두 번째 다음 메시지');tree=render();assert.equal(composer(tree).value,'두 번째 다음 메시지');release({});await tick();tree=render();assert.equal(composer(tree).value,'두 번째 다음 메시지');composer(tree).onSend();await tick();
+ assert.deepEqual(calls.map(([method,args])=>[method,args.text]),[['send','첫 다음 메시지'],['send','두 번째 다음 메시지']]);assert.notEqual(calls[0][1].requestId,calls[1][1].requestId);assert.equal(composer(render()).value,'');
+});
+test('uncertain send retains draft and durable request ID across renderer reload to prevent duplicate execution',async()=>{
+ const disk=memoryStorage(),snapshot={...state,sessions:[session('retry')]},props={initialSessionId:'retry',initialAgentId:agent.id};let render=fixture(snapshot,disk,props),calls=[];
+ invoke=async(method,args)=>{calls.push([method,args]);throw Error('acknowledgement lost');};let tree=render();composer(tree).onChange('보관할 메시지');tree=render();composer(tree).onSend();await tick();assert.equal(composer(render()).value,'보관할 메시지');const first=calls[0][1].requestId;
+ render=fixture(snapshot,disk,props);invoke=async(method,args)=>{calls.push([method,args]);return {};};tree=render();composer(tree).onSend();await tick();assert.equal(calls[1][1].requestId,first);assert.equal(composer(render()).value,'');
 });

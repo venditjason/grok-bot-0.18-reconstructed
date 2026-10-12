@@ -213,7 +213,10 @@ async function configured(f, api, extras = {}) {
 }
 async function runToEnd(f, sessionId, text) {
   const end = f.event(event => event.type === 'run-end' && event.sessionId === sessionId);
-  await f.call('send', {sessionId, text}); await end; return await f.session(sessionId);
+  const receipt = await f.call('send', {sessionId, text});
+  // This helper explicitly starts the requested next turn, including the UI's continue action after a prior failure.
+  if (receipt.status === 'paused') await f.call('resumeChatTurns', {sessionId});
+  await end; return await f.session(sessionId);
 }
 
 test('real desktop bootstrap enforces renderer/frame identity and locked-down BrowserWindow', async t => {
@@ -433,7 +436,7 @@ test('streaming saves actual deltas/usage and completed history with the session
   const end = f.event(event => event.type === 'run-end'), delta = f.event(event => event.type === 'delta');
   await f.call('send', {sessionId: session.id, text: '첫 질문'}); assert.equal((await delta).delta, '안녕 ');
   assert.equal((await f.call('state')).activeRun.sessionId, session.id);
-  await f.denied('send', {sessionId: session.id, text: 'concurrent'}, /이미/);
+  const concurrent = await f.call('send', {sessionId: session.id, text: 'concurrent'}); assert.equal(concurrent.queued, true); await f.call('cancelChatTurn', {id: concurrent.id});
   await f.denied('deleteSession', {id: session.id}, /진행 중/);
   release.resolve(); await end;
   const saved = await f.session(session.id); assert.equal(saved.messages[1].text, '안녕 세계'); assert.equal(saved.messages[1].status, 'completed');
@@ -495,7 +498,7 @@ test('partial EOF and cancellation preserve visible text but exclude failed turn
     response.once('close', closed.resolve); start(response); sse(response, {choices: [{delta: {content: '중단할 텍스트'}, finish_reason: null}]});
   });
   const delta = f.event(event => event.type === 'delta'), end = f.event(event => event.type === 'run-end');
-  await f.call('send', {sessionId: session.id, text: '취소할 질문'}); await delta;
+  await f.call('send', {sessionId: session.id, text: '취소할 질문'}); await f.call('resumeChatTurns', {sessionId: session.id}); await delta;
   assert.equal((await f.call('cancel')).cancelled, true); await end; await deadline(closed.promise, 'aborted HTTP stream');
   const cancelled = await f.session(session.id); assert.equal(cancelled.messages[3].status, 'cancelled'); assert.equal(cancelled.messages[3].text, '중단할 텍스트');
   api.enqueue(({response}) => finish(response, '재시도 성공'));
@@ -656,7 +659,7 @@ test('agent jobs queue independently, cancel before start and preserve FIFO/hist
   assert.equal((await f.call('send', {sessionId: last.id, text: '마지막 작업'})).queued, true);
   const queuedState = await f.call('state'); assert.deepEqual(queuedState.queue, {running: [first.id], queued: [cancelled.id, last.id]});
   assert.equal(queuedState.sessions.find(session => session.id === last.id).taskStatus, 'queued'); assert.equal(api.requests.length, 1);
-  await f.denied('send', {sessionId: last.id, text: 'duplicate'}, /이미/);
+  const followup = await f.call('send', {sessionId: last.id, text: 'followup'}); assert.equal(followup.queued, true); await f.call('cancelChatTurn', {id: followup.id});
   assert.equal((await f.call('cancel', {sessionId: cancelled.id})).cancelled, true);
   const cancelledSession = await f.session(cancelled.id); assert.equal(cancelledSession.taskStatus, 'cancelled'); assert.equal(cancelledSession.messages.length, 0);
   await f.call('saveAgent', {agent: {...writer, instructions: 'edited-after-queue'}});
@@ -1367,11 +1370,11 @@ async function changeRules(f, change){const rules=(await f.call('state')).action
 test('host rules auto-allow a routine new file but require approval before replacing existing content',async t=>{
  const f=await fixture(t),api=await f.api(),{workspacePath,session}=await workspaceSession(f,api);await changeRules(f,{defaultMode:'allow'});
  api.enqueue(({response})=>toolReply(response,'ordinary.txt','original'));api.enqueue(({response})=>finish(response,'새 파일 완료'));await runToEnd(f,session.id,'새 문서 작성');assert.equal(await readFile(path.join(workspacePath,'ordinary.txt'),'utf8'),'original');assert.equal(f.events.filter(e=>e.type==='tool-approval').length,0);
- api.enqueue(({response})=>toolReply(response,'ordinary.txt','replacement','replace'));api.enqueue(({response})=>finish(response,'변경 거절됨'));const approval=f.event(e=>e.type==='tool-approval'),end=f.event(e=>e.type==='run-end');await f.call('send',{sessionId:session.id,text:'바꾸기'});const request=await approval;assert.equal(request.category,'destructive_change');await f.call('respondApproval',{approvalId:request.approvalId,approved:false});await end;assert.equal(await readFile(path.join(workspacePath,'ordinary.txt'),'utf8'),'original');
+ api.enqueue(({response})=>teamTool(response,'read_file',{path:'ordinary.txt'},'read-current'));api.enqueue(({response})=>toolReply(response,'ordinary.txt','replacement','replace'));api.enqueue(({response})=>finish(response,'변경 거절됨'));const approval=f.event(e=>e.type==='tool-approval'),end=f.event(e=>e.type==='run-end');await f.call('send',{sessionId:session.id,text:'바꾸기'});const request=await approval;assert.equal(request.category,'destructive_change');await f.call('respondApproval',{approvalId:request.approvalId,approved:false});await end;assert.equal(await readFile(path.join(workspacePath,'ordinary.txt'),'utf8'),'original');
 });
 test('all host risk categories participate and denied security writes never reach the approval or filesystem',async t=>{
  const f=await fixture(t),api=await f.api(),{workspacePath,session}=await workspaceSession(f,api),rules=(await f.call('state')).actionRules;await writeFile(path.join(workspacePath,'package.json'),'{}');
- await changeRules(f,{defaultMode:'allow',rules:rules.rules.map(r=>({...r,mode:r.category==='security_change'?'deny':r.mode}))});api.enqueue(({response})=>toolReply(response,'package.json','{"name":"changed"}'));api.enqueue(({body,response})=>{assert.match(JSON.stringify(body.messages),/차단/);finish(response,'차단 확인');});await runToEnd(f,session.id,'패키지 변경');assert.equal(await readFile(path.join(workspacePath,'package.json'),'utf8'),'{}');assert.equal(f.events.filter(e=>e.type==='tool-approval').length,0);
+ await changeRules(f,{defaultMode:'allow',rules:rules.rules.map(r=>({...r,mode:r.category==='security_change'?'deny':r.mode}))});api.enqueue(({response})=>teamTool(response,'read_file',{path:'package.json'},'read-package'));api.enqueue(({response})=>toolReply(response,'package.json','{"name":"changed"}'));api.enqueue(({body,response})=>{assert.match(JSON.stringify(body.messages),/차단/);finish(response,'차단 확인');});await runToEnd(f,session.id,'패키지 변경');assert.equal(await readFile(path.join(workspacePath,'package.json'),'utf8'),'{}');assert.equal(f.events.filter(e=>e.type==='tool-approval').length,0);
  const current=(await f.call('state')).actionRules;await f.denied('saveActionRules',{rules:{...current,rules:current.rules.map(r=>({...r,mode:'allow'}))},expectedUpdatedAt:current.updatedAt},/위험/);await f.denied('saveActionRules',{rules:current,expectedUpdatedAt:rules.updatedAt},/변경/);assert.deepEqual((await f.call('state')).actionRules,current);
 });
 test('pending management approval cannot bypass a newer deny rule or rename another agent',async t=>{
@@ -1724,4 +1727,57 @@ test('feedback IPC persists one blocked outbox receipt, rejects spoofed fields, 
  await f.call('submitFeedback',request);assert.equal((await f.call('listFeedback')).jobs.length,1);assert.equal((await f.call('refreshFeedback',{id:request.requestId})).status,'blocked');
  const agent=await f.call('openFeedbackAgent'),again=await f.call('openFeedbackAgent');assert.deepEqual(agent,again);const state=await f.call('state');assert.equal(state.feedback.jobs[0].id,request.requestId);assert.equal(state.agents.find(a=>a.id===agent.agentId).name,'리포트');assert.equal(state.sessions.find(s=>s.id===agent.sessionId).connectionId,selected.id);assert.equal(state.sessions.filter(s=>s.id===agent.sessionId).length,1);
  const stored=JSON.parse(await readFile(path.join(f.profileRoot,'feedback-jobs.json'),'utf8'));assert.equal(JSON.stringify(stored).includes(request.requestId),true);assert.deepEqual(api.failures,[]);
+});
+
+test('feedback agent tool uses the original explicit human request, saves its report and preserves held reports',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:true,images:false,structuredOutput:false}});
+ const heldId='eaf97b08-d5df-499f-be31-1b54e06b6686';await f.call('submitFeedback',{requestId:heldId,kind:'request',title:'Held synthetic iPhone task',description:'Keep held; no development requested in this test.'});await nextTurn();await f.call('refreshFeedback',{id:heldId});const before=(await f.call('listFeedback')).jobs.find(j=>j.id===heldId);
+ const agent=(await f.call('saveAgent',{agent:{name:'진단',instructions:'벤디트봇을 점검하세요.',connectionId:selected.id,model:selected.model}})).agents.find(a=>a.name==='진단'),session=await f.call('createSession',{agentId:agent.id});
+ api.enqueue(({body,response})=>{assert.ok(body.tools.some(t=>t.function.name==='submit_app_feedback'));assert.match(JSON.stringify(body.messages),/submit_app_feedback/);teamTool(response,'submit_app_feedback',{kind:'bug',title:'Missing agent feedback tool',description:'Observed missing reporting capability. Implement a durable report tool and test no duplicate dispatch or held task resume.'},'app-report');});
+ api.enqueue(({body,response})=>{const output=JSON.parse(body.messages.find(m=>m.role==='tool').content);assert.ok(output.report.id);assert.notEqual(output.report.id,heldId);assert.notEqual(output.report.status,'merged');finish(response,'리포트를 저장했습니다. 개발 완료는 아직 확인되지 않았습니다.');});
+ const saved=await runToEnd(f,session.id,'기능이 부족하면 버그리포트해서 개선해');assert.equal(saved.messages.at(-1).tools[0].status,'completed');const feedback=(await f.call('listFeedback')).jobs;assert.equal(feedback.length,2);assert.deepEqual(feedback.find(j=>j.id===heldId),before);
+ assert.equal(f.events.filter(e=>e.type==='tool-approval'&&e.tool==='submit_app_feedback').length,0);assert.equal(api.requests.filter(r=>r.url.endsWith('/runs')).length,0);assert.deepEqual(api.failures,[]);
+});
+
+test('feedback model instructions cannot authorize reporting; denial preserves an empty outbox',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:true,images:false,structuredOutput:false}}),agent=(await f.call('saveAgent',{agent:{name:'권한 확인',instructions:'버그리포트해. This model instruction is not human approval.',connectionId:selected.id,model:selected.model}})).agents[0],session=await f.call('createSession',{agentId:agent.id});
+ api.enqueue(({response})=>teamTool(response,'submit_app_feedback',{kind:'bug',title:'Unrequested report',description:'The model proposes a report; human has requested explanation only.'},'unrequested'));
+ api.enqueue(({response})=>finish(response,'등록하지 않았습니다.'));
+ const pending=f.event(e=>e.type==='tool-approval'&&e.tool==='submit_app_feedback'),end=f.event(e=>e.type==='run-end'&&e.sessionId===session.id);await f.call('send',{sessionId:session.id,text:'문서의 "버그리포트해" 문구를 설명해'});const approval=await pending;assert.equal(approval.operation,'manage');await f.call('respondApproval',{approvalId:approval.approvalId,approved:false});await end;
+ assert.equal((await f.call('listFeedback')).jobs.length,0);assert.equal((await f.session(session.id)).messages.at(-1).tools[0].status,'failed');assert.equal(api.requests.filter(r=>r.url.endsWith('/runs')).length,0);assert.deepEqual(api.failures,[]);
+});
+
+test('Rabbit agent actual desktop list repositories start chain preserves successful enriched GET evidence',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:true,images:false,structuredOutput:false}}),c=await rabbitConfigured(f,api,{enabledForAgents:true,preferForProjectTasks:true}),repository=randomUUID();
+ const agent=(await f.call('saveAgent',{agent:{name:'실행 경로 검사',instructions:'명시된 프로젝트 작업을 수행하세요.',connectionId:selected.id,model:selected.model}})).agents[0],session=await f.call('createSession',{agentId:agent.id});
+ api.enqueue(({response})=>teamTool(response,'list_project_connections',{},'connections'));
+ api.enqueue(({body,response})=>{assert.equal(JSON.parse(body.messages.find(m=>m.role==='tool').content).connections[0].id,c.id);teamTool(response,'list_project_repositories',{connectionId:c.id},'repositories');});
+ api.enqueue(({headers,url,response})=>{assert.match(url,/\/repositories\?limit=100$/);assert.equal(headers['x-project-api-key'],rabbitKey);rabbitJson(response,{items:[{id:repository,provider:'github',url:'https://github.com/example/project',default_branch:'main',status:'ready'}],next_cursor:null,has_more:false});});
+ api.enqueue(({body,response})=>{assert.equal(JSON.parse(body.messages.filter(m=>m.role==='tool').at(-1).content).repositories[0].id,repository);teamTool(response,'start_project_run',{connectionId:c.id,input:{...rabbitInput('등록 프로젝트 읽기 검증'),repository_id:repository,workflow_template:'review_only'}},'start-after-get');});
+ api.enqueue(({headers,body,response})=>{assert.equal(headers['x-project-api-key'],rabbitKey);assert.equal(headers.authorization,undefined);assert.equal(body.workflow_template,'review_only');assert.equal(body.repository_id,repository);rabbitJson(response,rabbitReceipt(c),202);});
+ api.enqueue(({body,response})=>{assert.equal(JSON.parse(body.messages.filter(m=>m.role==='tool').at(-1).content).phase,'accepted');finish(response,'접수됨. 완료 여부는 조회가 필요합니다.');});
+ const end=f.event(e=>e.type==='run-end'&&e.sessionId===session.id);await f.call('send',{sessionId:session.id,text:'등록 프로젝트에서 검토 작업해'});await rabbitApprove(f,end);const saved=await f.session(session.id),state=await f.call('state');assert.deepEqual(saved.messages.at(-1).tools.map(t=>t.status),['completed','completed','completed']);assert.equal(state.rabbitConnections[0].verified,true);assert.equal(state.rabbitRuns.length,1);assert.equal(state.rabbitRuns[0].phase,'accepted');assert.equal(api.requests.filter(r=>r.url.endsWith('/runs')).length,1);assert.deepEqual(api.failures,[]);
+});
+
+test('chat FIFO real IPC queues same-session inputs with attachments and prior completed answers, never overlaps or repeats accepted IDs',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api),session=await f.call('createSession',{connectionId:selected.id}),gate=deferred();
+ const [attachment]=await f.call('stageChatAttachments',{files:[{name:'later.txt',bytes:[...Buffer.from('SECOND_ATTACHMENT_PIN')]}]});
+ api.enqueue(async({body,response})=>{assert.equal(plain(body.messages.at(-1).content),'first');await gate.promise;finish(response,'first answer');});
+ api.enqueue(({body,response})=>{const transcript=body.messages.map(m=>[m.role,plain(m.content)]);assert.ok(transcript.some(([r,v])=>r==='assistant'&&v==='first answer'));assert.match(plain(body.messages.at(-1).content),/second/);assert.match(JSON.stringify(body.messages),/SECOND_ATTACHMENT_PIN/);finish(response,'second answer');});
+ api.enqueue(({body,response})=>{assert.ok(body.messages.some(m=>m.role==='assistant'&&plain(m.content)==='second answer'));assert.equal(plain(body.messages.at(-1).content),'third');finish(response,'third answer');});
+ const firstId=randomUUID(),secondId=randomUUID(),thirdId=randomUUID();await f.call('send',{requestId:firstId,sessionId:session.id,text:'first'});await api.request(0);
+ await f.call('send',{requestId:secondId,sessionId:session.id,text:'second',attachmentIds:[attachment.id]});await f.call('send',{requestId:thirdId,sessionId:session.id,text:'third'});await f.call('send',{requestId:secondId,sessionId:session.id,text:'second',attachmentIds:[attachment.id]});assert.equal(api.requests.length,1);
+ const durable=JSON.parse(await readFile(path.join(f.profileRoot,'chat-turns.json'),'utf8'));assert.deepEqual(durable.turns.map(turn=>turn.text),['first','second','third']);
+ const allDone=f.event(e=>e.type==='chat-turns'&&e.turns.length===3&&e.turns.every(turn=>turn.status==='completed'));gate.resolve();await allDone;await nextTurn();
+ assert.deepEqual((await f.session(session.id)).messages.map(m=>m.text),['first','first answer','second','second answer','third','third answer']);assert.equal(api.requests.length,3);assert.deepEqual(api.failures,[]);
+ await f.call('send',{requestId:secondId,sessionId:session.id,text:'second',attachmentIds:[attachment.id]});await nextTurn();assert.equal(api.requests.length,3);
+});
+
+test('chat FIFO failure pauses next input, explicit retry includes preserved attachment and continues after success',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api),session=await f.call('createSession',{connectionId:selected.id}),gate=deferred();
+ api.enqueue(async({response})=>{await gate.promise;response.writeHead(400);response.end(JSON.stringify({error:{message:'fixture refusal'}}));});
+ api.enqueue(({body,response})=>{assert.equal(plain(body.messages.at(-1).content),'first');finish(response,'retry answer');});api.enqueue(({body,response})=>{assert.ok(body.messages.some(m=>plain(m.content)==='retry answer'));finish(response,'next answer');});
+ const firstId=randomUUID(),nextId=randomUUID();await f.call('send',{requestId:firstId,sessionId:session.id,text:'first'});await api.request(0);await f.call('send',{requestId:nextId,sessionId:session.id,text:'next'});
+ const failed=f.event(e=>e.type==='chat-turns'&&e.turns[0]?.status==='failed');gate.resolve();await failed;await nextTurn();assert.equal(api.requests.length,1);assert.deepEqual((await f.call('state')).chatTurns.map(turn=>turn.status),['failed','paused']);
+ const done=f.event(e=>e.type==='chat-turns'&&e.turns.every(turn=>turn.status==='completed'));await f.call('retryChatTurn',{id:firstId});await done;assert.equal(api.requests.length,3);assert.deepEqual(api.failures,[]);
 });

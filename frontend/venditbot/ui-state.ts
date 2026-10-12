@@ -1,3 +1,4 @@
+import type {ChatTurn} from '../../source/shared/chat-turns';
 import type { ChatAttachment } from '../../source/shared/chat-attachments';
 import type {Routine} from '../../source/shared/routines';
 import type {DevelopmentBinding} from '../../source/shared/development-routing';
@@ -28,9 +29,10 @@ export type UpdateProgress = {
   percent?: number; completedBytes?: number; totalBytes?: number; startedAt: string; updatedAt: string;
 };
 export type UpdateStatus = { phase: 'development' | 'idle' | 'available' | 'installing' | 'error'; currentVersion: string; version?: string; error?: string; progress?: UpdateProgress };
-export type State = { routines?: Routine[]; routineError?: string; rabbitConnections?: RabbitProfile[]; rabbitRuns?: RabbitRunRecord[]; actionRules?: ActionRules; policies?: AgentPolicy[]; avatarJobs?: AvatarJob[]; update?: UpdateStatus; profiles: Profile[]; agents: AgentProfile[]; teams?: TeamProfile[]; teamRuns?: TeamRunSummary[]; sessions: Session[]; queue: { running: string[]; queued: string[] }; activeRun: { sessionId: string } | null; unsavedSessionIds?: string[]; unsavedTeamRunIds?: string[]; unsavedRabbitRunIds?: string[]; version: string };
+export type State = { chatTurns?: ChatTurn[]; chatTurnStorageError?: string; routines?: Routine[]; routineError?: string; rabbitConnections?: RabbitProfile[]; rabbitRuns?: RabbitRunRecord[]; actionRules?: ActionRules; policies?: AgentPolicy[]; avatarJobs?: AvatarJob[]; update?: UpdateStatus; profiles: Profile[]; agents: AgentProfile[]; teams?: TeamProfile[]; teamRuns?: TeamRunSummary[]; sessions: Session[]; queue: { running: string[]; queued: string[] }; activeRun: { sessionId: string } | null; unsavedSessionIds?: string[]; unsavedTeamRunIds?: string[]; unsavedRabbitRunIds?: string[]; version: string };
 export type Auth = { installed?: boolean; phase: string; authenticated: boolean; inferenceVerified: boolean; credentialStorage?: 'session' | 'keyring' | 'provider-managed'; account?: { email?: string | null; plan?: string | null } | null; error?: string | null };
 export type UiEvent =
+  | {type: 'chat-turns'; turns: ChatTurn[]; error?: string}
   | { type: 'routines'; routines: Routine[] }
   | { type: 'routine-error'; error: string }
   | { type: 'rabbit'; rabbitConnections: RabbitProfile[]; rabbitRuns: RabbitRunRecord[] }
@@ -82,6 +84,7 @@ export function duplicateConnectionIndex(connections: AgentConnection[]): number
 
 /** Only the matching live message may receive streamed updates. */
 export function reduceStateEvent(state: State, event: UiEvent | QueueEvent): State {
+  if (event.type === 'chat-turns') return {...state, chatTurns: event.turns, chatTurnStorageError: event.error};
   if (event.type === 'routine-error') return { ...state, routineError: event.error };
   if (event.type === 'routines') return { ...state, routines: event.routines };
   if (event.type === 'rabbit') return { ...state, rabbitConnections: event.rabbitConnections, rabbitRuns: event.rabbitRuns };

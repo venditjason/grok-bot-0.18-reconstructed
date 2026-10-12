@@ -18,7 +18,7 @@ export class RabbitHost {
   connections(){return this.options.store.listConnections().map(c=>({...c,hasKey:this.options.secrets.has(secretKey(c.id)),verified:this.isVerified(c)}));}
   isBusy(){return this.pending.size>0;}
   private isVerified(connection:RabbitConnection):boolean {
-    const result=this.verified.get(connection.id);return !!result&&result.revision===JSON.stringify(connection)&&result.keyRevision===this.options.secrets.revision(secretKey(connection.id))&&Date.now()-result.checkedAt<300_000;
+    const result=this.verified.get(connection.id),age=result?Date.now()-result.checkedAt:-1;return !!result&&result.revision===JSON.stringify(connection)&&result.keyRevision===this.options.secrets.revision(secretKey(connection.id))&&age>=0&&age<300_000;
   }
   preferredForTask(text:string):RabbitConnection[] {
     const normalized=text.normalize('NFKC').toLowerCase();
@@ -78,9 +78,12 @@ export class RabbitHost {
     const done=Promise.resolve().then(()=>{abort(controller.signal);return fn(controller.signal);}).finally(()=>{signal?.removeEventListener('abort',forward);this.pending.delete(id);this.options.changed();});
     this.pending.set(id,{controller,done});return done;
   }
-  test(connection:RabbitConnection,signal?:AbortSignal,forAgent=false){
-    this.verified.delete(connection.id);
-    return this.operation(`test:${connection.id}`,signal,async current=>{
+  test(input:RabbitConnection,signal?:AbortSignal,forAgent=false){
+    this.verified.delete(input.id);
+    return this.operation(`test:${input.id}`,signal,async current=>{
+      // Tool listings add presentation fields (hasKey/verified). Bind evidence
+      // to the canonical saved revision, never to those transient fields.
+      const connection=this.checked(input,forAgent);
       if(!await this.options.authorize({path:'.',operation:'read',tool:'list_project_repositories',category:'routine',reason:`${connection.name}의 등록 저장소를 조회합니다.`},current))throw new Error('프로젝트 저장소 조회를 승인하지 않았습니다.');
       const keyRevision=this.options.secrets.revision(secretKey(connection.id));
       const key=await this.key(connection,current,forAgent),result=await testRabbitConnection(connection,key,current);abort(current);this.checked(connection,forAgent);
@@ -107,6 +110,7 @@ export class RabbitHost {
     try{
       if(!await this.options.authorize({path:'.',operation:'manage',tool:'start_project_run',category:'external_publish',...(sensitive?{categories:['external_publish','sensitive_disclosure']}:{}),preview:sensitive?'[민감정보 형태가 감지되어 요청 미리보기를 숨겼습니다.]':JSON.stringify(request,null,2).slice(0,8000),reason:`${connection.name} (${connection.baseUrl})에 외부 작업을 접수합니다. 202는 완료가 아닌 접수입니다. 이후 고위험 동작의 승인은 Rabbit 자체 규칙을 따르며 이 앱에서 원격 취소할 수 없습니다.`},signal,record.source?.sessionId))throw new Error('외부 프로젝트 실행을 승인하지 않았습니다.');
       abort(signal);const key=await this.key(connection,signal,forAgent);this.options.assertMutable();
+      if(forAgent&&connection.preferForProjectTasks&&!this.isVerified(connection))throw new Error('승인 대기 중 Rabbit GET 검사 또는 프로젝트 API 키가 만료·변경되었습니다. list_project_repositories로 다시 확인하세요. 자동 재접수하지 않습니다.');
       // Synchronous durable boundary immediately before the only POST.
       this.options.store.beginSubmission(record.id);sent=true;this.options.changed();
       const receipt=await submitRabbitRun(record.connectionSnapshot,key,request,record.idempotencyKey,signal);
