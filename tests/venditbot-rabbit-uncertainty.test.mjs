@@ -38,6 +38,14 @@ for(const status of [400,401,404,409,422])test(`retry HTTP${status} cannot erase
  assert.throws(()=>f.host.assertLocalWrite('follow-up work',f.source),/로컬 중복 실행/);
 });
 
+for(const [code,status] of [['execution_admission_paused',503],['legacy_run_read_only',409],['legacy_runtime_read_only',409]])test(`retry ${code} keeps the prior unresolved submission and local duplicate guard`,async t=>{
+ const f=await fixture(t);f.setTransport(()=>Response.json({error:{code}},{status}));
+ const retried=await f.host.retry(f.record.id);assert.equal(f.sends,2);assert.equal(retried.phase,'unknown');
+ assert.equal(retried.idempotencyKey,f.record.idempotencyKey);assert.deepEqual(retried.request,f.record.request);
+ assert.throws(()=>f.host.assertLocalWrite('follow-up work',f.source),/로컬 중복 실행/);
+ assert.equal(new RabbitStore(f.root).getRun(f.record.id).phase,'unknown');
+});
+
 test('uncertainty survives retry-in-progress and restart; the same validated receipt clears it',async t=>{
  const f=await fixture(t);const pending=f.store.beginSubmission(f.record.id);
  assert.equal(pending.unresolvedSubmission,true);assert.equal(pending.phase,'submitting');

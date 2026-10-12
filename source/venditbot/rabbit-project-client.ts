@@ -10,12 +10,21 @@ import {
 const RESPONSE_LIMIT = 1024 * 1024;
 const ERROR_CODES = new Set(['invalid_api_key', 'invalid_principal', 'project_archived', 'project_not_found', 'project_scope_mismatch', 'run_not_found', 'owner_session_required', 'invalid_limit', 'invalid_cursor', 'event_cursor_expired', 'cursor_conflict', 'idempotency_conflict', 'idempotency_key_required', 'invalid_request', 'invalid_json', 'payload_too_large', 'ambiguous_principal', 'attachment_not_registered', 'repository_not_found', 'rate_limited',
   // Explicit public error codes from the verified server's http.ts/project-api.ts, never its raw message.
-  'internal_error', 'database_schema_unavailable', 'validation_error', 'repository_scope_mismatch', 'request_too_large', 'json_required', 'body_required', 'body_not_allowed', 'cross_origin_denied', 'unsupported_model_selection', 'identity_mismatch', 'runtime_login_changed', 'runtime_session_changed', 'runtime_reverification_required', 'already_exists', 'access_denied', 'not_found']);
+  'internal_error', 'database_schema_unavailable', 'execution_admission_paused', 'legacy_run_read_only', 'legacy_runtime_read_only', 'validation_error', 'repository_scope_mismatch', 'request_too_large', 'json_required', 'body_required', 'body_not_allowed', 'cross_origin_denied', 'unsupported_model_selection', 'identity_mismatch', 'runtime_login_changed', 'runtime_session_changed', 'runtime_reverification_required', 'already_exists', 'access_denied', 'not_found']);
+function recoveryMessage(code: string): string {
+  switch (code) {
+    case 'database_schema_unavailable': return ' Rabbit 서버의 데이터베이스 복구가 필요합니다. 기존 접수 기록을 보관하세요.';
+    case 'execution_admission_paused': return ' Rabbit 실행 준비 확인 중으로 새 작업 접수가 일시 중지됐습니다. 기존 접수 기록을 보관하고 준비 완료 후 같은 요청으로 재시도하세요.';
+    case 'legacy_run_read_only':
+    case 'legacy_runtime_read_only': return ' 이전 실행 기록은 보존 상태입니다. Rabbit 소유자 화면에서 기존 작업의 결과와 종료 여부를 확인하세요. 이 오류는 기존 작업의 완료나 취소를 뜻하지 않습니다.';
+    default: return '';
+  }
+}
 export class RabbitProjectApiError extends Error {
   readonly code: string; readonly status?: number; readonly uncertain: boolean; readonly requestId?: string;
   constructor(code: string, uncertain = false, status?: number, requestId?: unknown) {
     const safeRequestId = typeof requestId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(requestId) ? requestId.toLowerCase() : undefined;
-    super(`Rabbit 요청을 완료하지 못했습니다 (${code}${status === undefined ? '' : `, HTTP ${status}`}).${code === 'database_schema_unavailable' ? ' Rabbit 서버의 데이터베이스 복구가 필요합니다. 기존 접수 기록을 보관하세요.' : ''}${uncertain ? ' 원격 접수 여부는 확인되지 않았습니다. 로컬 대기 취소는 원격 작업 취소가 아닙니다.' : ''}${safeRequestId ? ` 진단 요청 ID: ${safeRequestId}` : ''}`);
+    super(`Rabbit 요청을 완료하지 못했습니다 (${code}${status === undefined ? '' : `, HTTP ${status}`}).${recoveryMessage(code)}${uncertain ? ' 원격 접수 여부는 확인되지 않았습니다. 로컬 대기 취소는 원격 작업 취소가 아닙니다.' : ''}${safeRequestId ? ` 진단 요청 ID: ${safeRequestId}` : ''}`);
     this.name = 'RabbitProjectApiError'; this.code = code; this.uncertain = uncertain;
     if (status !== undefined) this.status = status;
     if (safeRequestId) this.requestId = safeRequestId;

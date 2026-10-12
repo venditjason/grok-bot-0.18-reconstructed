@@ -141,6 +141,19 @@ test('schema failures retain safe diagnostic IDs and the original request withou
   }
 });
 
+test('admission pause and preserved-history errors explain recovery without retrying or trusting server text', async () => {
+  for (const [code, status, message] of [['execution_admission_paused', 503, /같은 요청으로 재시도/], ['legacy_run_read_only', 409, /기존 작업의 완료나 취소를 뜻하지/], ['legacy_runtime_read_only', 409, /기존 작업의 완료나 취소를 뜻하지/]]) {
+    let calls = 0;
+    const client = new RabbitProjectClient({fetch: async () => {calls++; return response({error: {code, message: `unsafe ${key}`, details: {secret: key}}}, status);}});
+    await assert.rejects(client.submitRabbitRun(connection(), key, input(), other), error => {
+      errorIs(code, status === 503, status)(error); assert.match(error.message, message); assert.doesNotMatch(error.message, /unsafe/); return true;
+    });
+    assert.equal(calls, 1);
+    await assert.rejects(client.getRabbitRun(connection(), key, run), errorIs(code, false, status));
+    assert.equal(calls, 2);
+  }
+});
+
 test('redirects and successful-but-invalid POST receipts remain uncertain and never follow untrusted URLs', async () => {
   for (const [reply, code] of [[new Response(null, {status: 307, headers: {Location: 'https://evil.example'}}), 'redirect_blocked'], [response(receipt(undefined, {poll_url: 'https://evil.example'}), 202), 'invalid_response'], [response(receipt(), 200), 'http_error']]) {
     let calls = 0; const client = new RabbitProjectClient({fetch: async () => {calls++; return reply;}});
