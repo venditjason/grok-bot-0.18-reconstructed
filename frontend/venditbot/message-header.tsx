@@ -1,0 +1,19 @@
+import type * as ReactTypes from 'react';
+import type { Message, ConnectionAttempt } from './ui-state';
+const React: typeof ReactTypes = window.React;
+const {Button, Badge, Dialog} = window.VDS;
+export function ConnectionAttempts({ attempts, connectionName }: { attempts: ConnectionAttempt[]; connectionName(id: string): string }) {
+ return <div className="connection-attempts bg-background-base-subtle rounded-lg"><div className="typo-l1/m text-glyph-gray-description">실제 연결 시도</div><ol aria-label="실제 연결 시도">{attempts.map((attempt,index)=><li key={index}><div className="attempt-heading typo-l1/r text-glyph-gray-body"><span>{index+1}. {connectionName(attempt.connectionId)} · {attempt.model}{attempt.effort ? ` · ${attempt.effort}` : ''}</span><Badge kind={attempt.status==='failed'?'destructive':attempt.status==='completed'?'success':'common'}>{attempt.status==='failed'?'실패':attempt.status==='completed'?'응답 완료':'시도 중'}</Badge></div>{attempt.error&&<p className="attempt-error typo-l2/r text-glyph-danger-body">{attempt.error}</p>}</li>)}</ol></div>;
+}
+const kinds:Record<string,string>={routine:'반복 작업',standard:'일반 작업',complex:'복잡한 작업'};
+export function MessageHeader({message,connectionName}:{message:Message;connectionName(id:string):string}){
+ const [details,setDetails]=React.useState<'policy'|'connections'|null>(null);
+ const selection=message.routeSelection,attempts=message.attempts??[],last=attempts.at(-1),failed=attempts.filter(item=>item.status==='failed').length;
+ return <><div className="message-heading typo-b3/sb text-glyph-gray-heading"><span>{message.role==='user'?'나':'벤디트봇'}</span>
+ {message.role==='assistant'&&<Button kind="common" hierarchy="secondary" size="xsmall" aria-haspopup="dialog" onPress={()=>setDetails('policy')}>작업 정책</Button>}
+ {message.status==='cancelled'&&<Badge kind="warning">중단됨</Badge>}{message.status==='failed'&&<Badge kind="destructive">응답 실패</Badge>}
+ {message.role==='assistant'&&attempts.length>0&&<div className="message-attempt-tag"><Button kind={failed?'destructive':'common'} hierarchy="secondary" size="xsmall" aria-haspopup="dialog" aria-label={`실제 연결 시도 ${attempts.length}회${failed?`, 실패 ${failed}회`:''} 상세`} onPress={()=>setDetails('connections')}>연결 {attempts.length}회 · {last?.status==='running'?'시도 중':last?.status==='completed'?'응답 완료':'실패'}{failed?` · 실패 ${failed}`:''}</Button></div>}</div>
+ <Dialog.Root open={details!==null} onOpenChange={(open:boolean)=>{if(!open)setDetails(null);}}><Dialog.Portal managed={false}><Dialog.Content size="normal"><Dialog.Header title={details==='connections'?'실제 연결 시도':'작업 정책'} description={details==='connections'?'이 응답에서 실제로 시도한 순서와 결과입니다.':'이 메시지를 시작할 때 선택한 정책입니다.'}/><div className="dialog-body message-detail-body">
+ {details==='connections'?<ConnectionAttempts attempts={attempts} connectionName={connectionName}/>:selection?<><h3 className="typo-b1/sb text-glyph-gray-heading">{selection.policyName}</h3><p className="typo-b3/r text-glyph-gray-body">{kinds[selection.taskKind]??selection.taskKind} · {selection.reason}</p><ol className="connection-routes typo-b3/r text-glyph-gray-description">{selection.connections.map((route,index)=><li key={index}>{index+1}. {connectionName(route.connectionId)} · {route.model}{route.effort?` · ${route.effort}`:''}</li>)}</ol>{selection.efficiency&&<p className="typo-l1/r text-glyph-gray-description">절약 적용 · 이전 대화 최대 {selection.efficiency.maxHistoryTurns}회 / {selection.efficiency.maxHistoryCharacters.toLocaleString('ko-KR')}자 · 지정 모델만 사용</p>}{selection.warning&&<p role="status" className="typo-b3/r text-glyph-warning-body">{selection.warning}</p>}</>:<p className="typo-b3/r text-glyph-gray-description">이 메시지에는 저장된 자동 정책 기록이 없습니다. 대화에 지정된 연결 순서를 사용합니다. 실제 시도 내역이 있으면 연결 태그에서 확인할 수 있습니다.</p>}
+ </div><Dialog.Footer RightComponent={()=><Button kind="common" hierarchy="secondary" size="medium" onPress={()=>setDetails(null)}>닫기</Button>}/></Dialog.Content></Dialog.Portal></Dialog.Root></>;
+}

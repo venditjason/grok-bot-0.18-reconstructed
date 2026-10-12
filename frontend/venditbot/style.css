@@ -241,3 +241,20 @@ nav[data-sidebar-dragging="true"] .agent-photo-tile:hover { transform: none; }
 .profile-context-menu > button:not(:disabled):is(:hover, :focus-visible) { background: var(--v-effect-state-hover); outline: none; }
 .profile-context-menu > button:disabled { opacity: .4; cursor: default; }
 .profile-context-menu > [role="separator"] { height: 1px; margin: 4px; background: var(--v-line-separator-stroke); }
+
+/* Compact message evidence and scheduled-work controls. */
+.message-attempt-tag{margin-left:auto;min-width:0}.message-attempt-tag button{max-width:100%;white-space:normal}.message-detail-body{max-height:65vh;overflow:auto;overflow-wrap:anywhere}.message-detail-body .connection-attempts{margin:0}.message-heading{flex-wrap:wrap}.message-heading>span:first-child{flex-shrink:0}
+.routines-page{display:flex;flex-direction:column;gap:20px}.routine-page-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.routine-page-heading p{margin-top:10px}.routines-page .settings-note{margin-top:0}.routine-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.routine-card,.routine-form{display:flex;flex-direction:column;gap:14px;padding:22px;min-width:0}.routine-form{gap:20px}.routine-actions{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.routine-prompt,.routine-error{white-space:pre-wrap;overflow-wrap:anywhere}.routine-prompt{max-height:240px;overflow:auto;margin-top:10px}.routine-weekdays{display:flex;flex-wrap:wrap;gap:14px;border:0;padding:0}.routine-weekdays legend{margin-bottom:10px}.routine-timing p+p{margin-top:6px}.routine-conflict{display:flex;flex-wrap:wrap;gap:10px}.routine-conflict p{width:100%}.routine-card h3{overflow-wrap:anywhere}.routine-card details>summary{cursor:pointer}
+@media(max-width:1050px){.routine-list{grid-template-columns:1fr}.routine-page-heading{align-items:flex-start}.routine-card,.routine-form{padding:18px}}
+
+.app-connections-dialog{width:min(860px,calc(100vw - 48px));max-width:calc(100vw - 48px);max-height:calc(100vh - 48px)}.app-connections-body{max-height:70vh;overflow:auto}.app-connection-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.app-connection-card,.connector-config{padding:18px;display:flex;flex-direction:column;gap:12px;min-width:0}.app-connection-actions{display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-end;margin-top:auto}.connector-scopes{list-style:disc;padding-left:20px;overflow-wrap:anywhere;margin-top:8px}.connector-setup-url{overflow-wrap:anywhere}.app-connection-card details summary{cursor:pointer}.connector-config{margin-top:8px}.app-connection-card .check-label{align-items:flex-start}.app-connection-card h3{overflow-wrap:anywhere}@media(max-width:760px){.app-connection-list{grid-template-columns:1fr}}
+
+.brand{display:flex;flex-direction:column;align-items:stretch;gap:4px;padding:4px 0 10px;min-width:0}
+.brand-heading{display:flex;align-items:center;gap:5px;min-width:0}
+.brand .brand-symbol{width:24px;height:24px;border-radius:8px;font-size:14px;font-weight:700;flex-shrink:0}
+.brand-name{font-size:14px;line-height:24px;font-weight:700;white-space:nowrap;flex-shrink:0}
+.brand-version{font-size:11px;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.brand-heading .brand-update{font-size:11px;line-height:18px;padding:4px 6px;min-height:26px;height:auto;white-space:nowrap;flex-shrink:0;margin-left:auto}
+.brand-tools{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0}
+.brand-tools .brand-caption{margin:0 0 0 29px;white-space:nowrap;font-size:10px}
+.brand-tools>button{flex-shrink:0}
