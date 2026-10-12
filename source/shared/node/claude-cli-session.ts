@@ -36,14 +36,36 @@ function claudeInput(options: ClaudeCliTurnOptions): string {
   if (input.length > 500_000) throw new Error("Claude 문맥 이관은 500,000자 이하여야 합니다. 새 대화에서 이어가세요. 기존 이력은 보존됩니다.");
   return input;
 }
+/** Official stream-json user blocks carry image bytes directly; never grant CLI file tools. */
+export function claudeAttachmentInput(options:ClaudeCliTurnOptions):{input:string;streamJson:boolean}{
+  const normalized=options.messages.map(message=>({...message,content:Array.isArray(message.content)&&message.content.every((p:any)=>p?.type==='text'&&typeof p.text==='string')?message.content.map((p:any)=>p.text).join('\n\n'):message.content}));
+  const hasImages=normalized.some(m=>Array.isArray(m.content)&&m.content.some((p:any)=>p?.type==='image'));
+  if(!hasImages)return {input:claudeInput({...options,messages:normalized}),streamJson:false};
+  const last=normalized.at(-1);if(last?.role!=='user')throw Error('Claude 첨부는 사용자 메시지에만 보낼 수 있습니다.');
+  const selected=options.sessionId?[last]:normalized;
+  const blocks:any[]=[];
+  const quoted=normalized.map((m,index)=>({...m,content:Array.isArray(m.content)?m.content.map((p:any)=>{
+    if(p?.type!=='image')return p;
+    if(m.role!=='user'||typeof p.image!=='string')throw Error('지원하지 않는 Claude 이미지 첨부입니다.');
+    const match=/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/]+={0,2})$/.exec(p.image);if(!match)throw Error('Claude 첨부에는 검증된 이미지 바이트가 필요합니다.');
+    if(selected.includes(m))blocks.push({type:'text',text:`인용된 사용자 메시지 ${index+1}의 첨부 이미지`},{type:'image',source:{type:'base64',media_type:match[1],data:match[2]}});
+    return {type:'text',text:'[첨부 이미지: 별도 이미지 블록으로 제공]'};
+  }):m.content}));
+  const current=quoted.at(-1)!;const currentText=typeof current.content==='string'?current.content:current.content.map((p:any)=>{if(p?.type!=='text'||typeof p.text!=='string')throw Error('Claude 사용자 첨부 형식을 확인하세요.');return p.text;}).join('\n\n');
+  const prompt=claudeInput({...options,messages:[...quoted.slice(0,-1),{...current,content:currentText}]});
+  const input=JSON.stringify({type:'user',message:{role:'user',content:[{type:'text',text:prompt},...blocks]},parent_tool_use_id:null,session_id:options.sessionId??''})+'\n';
+  if(Buffer.byteLength(input)>10*1024*1024)throw Error('Claude 첨부 입력은 인코딩 후 10 MiB 이하여야 합니다. 이미지 수나 크기를 줄여 주세요.');
+  return {input,streamJson:true};
+}
 /** Official noninteractive CLI; subscription credentials stay inside the CLI. */
 export async function* streamClaudeCliTurn(options: ClaudeCliTurnOptions): AsyncGenerator<ClaudeTurnEvent> {
-  const input = claudeInput(options);
+  const {input,streamJson} = claudeAttachmentInput(options);
   if (options.sessionId && !/^[a-zA-Z0-9_-]{1,128}$/.test(options.sessionId)) throw new Error("Invalid Claude session ID.");
   if (options.signal?.aborted) throw new DOMException("요청이 취소되었습니다.", "AbortError");
   if (options.systemInstructions != null && options.systemInstructions.length > 32_000) throw new Error("에이전트 지침은 32,000자 이하여야 합니다.");
   const mcp = claudeMcpOptions(options.mcpServer);
   const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", "", "--strict-mcp-config", "--mcp-config", mcp.config, "--setting-sources", "", "--permission-mode", "default", "--max-turns", options.mcpServer ? "8" : "1", ...(options.mcpServer ? ["--allowedTools", "mcp__venditbot__*"] : []), "--system-prompt", `You are 벤디트봇 (VenditBot), a concise desktop assistant. Use only tools explicitly supplied by VenditBot. Tool permissions and workspace scope are enforced by the app.${options.systemInstructions ? `\n\nAgent instructions:\n${options.systemInstructions}` : ""}`, ...(options.model ? ["--model", options.model] : []), ...(options.effort ? ["--effort", options.effort] : []), ...(options.sessionId ? ["--resume", options.sessionId, "--fork-session"] : [])];
+  if(streamJson)args.push('--input-format','stream-json');
   const child = spawn(options.executable, args, { cwd: options.cwd, env: { ...options.env, ...mcp.env, ENABLE_CLAUDEAI_MCP_SERVERS: "false", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }, stdio: "pipe", windowsHide: true });
   options.onChild?.(child);
   const queue: any[] = []; let buffer = ""; let text = ""; let failure: Error | undefined; let exited = false; let exitCode: number | null = null;

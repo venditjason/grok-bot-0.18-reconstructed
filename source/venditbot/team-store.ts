@@ -1,3 +1,4 @@
+import {validChatAttachments,type ChatAttachment} from '../shared/chat-attachments.js';
 import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
 import {lstatSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
@@ -11,7 +12,7 @@ export type TeamStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancel
 export type TeamStepStatus = TeamStatus | 'pending';
 export type TeamCreation = {requestId: string; inputHash: string; leaderAgentId: string; policyId: string};
 export type TeamProfile = {development?: DevelopmentBinding;creation?: TeamCreation; autonomous?: boolean; id: string; name: string; instructions: string; topic: string; policies: string; leaderAgentId: string; memberAgentIds: string[]; rounds: number; createdAt: string; updatedAt: string};
-export type TeamMessage = {id: string; fromAgentId?: string; fromAgentName: string; toAgentId?: string; text: string; kind: 'user' | 'agent' | 'result' | 'system'; sessionId?: string; createdAt: string};
+export type TeamMessage = {attachments?:ChatAttachment[];id: string; fromAgentId?: string; fromAgentName: string; toAgentId?: string; text: string; kind: 'user' | 'agent' | 'result' | 'system'; sessionId?: string; createdAt: string};
 export type TeamStep = {sessionId: string; agentId: string; agentName: string; round: number; kind: 'plan' | 'work' | 'summary'; taskKind?: 'routine' | 'standard' | 'complex'; connections?: ConnectionRoute[]; routeSelection?: AgentPolicySelection; task?: string; parentSessionId?: string; status: TeamStepStatus};
 export type TeamContext = {runId: string; goal: string; policies: string; result: string; excerpt: boolean};
 export type StoredTeamRun = {routineDispatchId?: string;development?: DevelopmentBinding;autonomous?: boolean; id: string; teamId: string; teamName: string; teamUpdatedAt: string; previousRunId?: string; context?: TeamContext[]; policySnapshots?: {agentId: string; policy: AgentPolicy}[]; goal: string; instructions: string; topic: string; policies: string; leaderAgentId: string; activeMemberAgentIds: string[]; memberSnapshots: AgentProfile[]; additions: number; status: TeamStatus; rounds: number; createdAt: string; updatedAt: string; steps: TeamStep[]; messages: TeamMessage[]; finalSessionId?: string; error?: string};
@@ -54,7 +55,7 @@ export function validTeamRun(value: unknown): value is StoredTeamRun {
   }) || r.steps.filter(s => s.kind === 'plan').length > 3 || r.steps.filter(s => s.kind === 'work').length > teamDelegationLimit(r) || r.steps.filter(s => s.kind === 'summary').length > 1
     || r.steps[0]?.kind !== 'plan' || (r.finalSessionId !== undefined && !r.steps.some(s => s.sessionId === r.finalSessionId && s.agentId === r.leaderAgentId))) return false;
   return Array.isArray(r.messages) && r.messages.length <= teamMessageLimit(r) && new Set(r.messages.map(m => m?.id)).size === r.messages.length && r.messages.every(m => {
-    if (!m || !text(m.id, 100) || !text(m.text, teamLimits.messageCharacters) || !date(m.createdAt) || !['user', 'agent', 'result', 'system'].includes(m.kind)) return false;
+    if (!m || (m.attachments!==undefined&&(!validChatAttachments(m.attachments)||m.kind!=='user'||m.fromAgentId!==undefined)) || !text(m.id, 100) || !text(m.text, teamLimits.messageCharacters) || !date(m.createdAt) || !['user', 'agent', 'result', 'system'].includes(m.kind)) return false;
     const sender = r.memberSnapshots.find(a => a.id === m.fromAgentId);
     return (m.fromAgentId === undefined ? (m.kind === 'user' || m.kind === 'system') && text(m.fromAgentName, 80) : !!sender && m.fromAgentName === sender.name && (m.kind === 'agent' || m.kind === 'result'))
       && (m.toAgentId === undefined || r.memberSnapshots.some(a => a.id === m.toAgentId))

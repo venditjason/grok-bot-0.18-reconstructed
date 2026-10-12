@@ -9,6 +9,11 @@ import { SandSettingsStore } from '../shared/node/settings/sand-settings-store.j
 import { apiProfileSecretKey, normalizeApiProviderProfile, type ApiProviderProfile } from '../shared/api-provider-config.js';
 import { streamApiProvider, validateApiProviderConnection } from '../host/extensions/inference/api-provider-transport.js';
 import { configureProviderAuthRuntime, beginProviderLogin, getProviderAuthStatus, cancelProviderLogin, disconnectProvider, testProviderConnection, shutdownProviderAuthRuntime, shutdownProviderAuthRuntimeForUpdate, runCodexTurn, runClaudeTurn, listProviderModels, type LoginProvider } from '../shared/node/provider-auth-runtime.js';
+import {FeedbackMainAdapter} from './feedback-main-adapter.js';
+import {feedbackGithubInput, feedbackGithubProofResponse} from './feedback-github-proof.js';
+import type {FeedbackBinding} from '../shared/feedback.js';
+import {ChatAttachmentStore} from './chat-attachments.js';
+import type {ChatAttachment} from '../shared/chat-attachments.js';
 import { LocalSessionStore, EncryptedSecretStore, safeError, completedHistory, sessionMarkdown, connectionRoutes, connectionRouteKey, validConnections, type ConnectionRoute, type ConnectionAttempt, type ChatSession, type ChatMessage, type ToolRecord } from './local-store.js';
 import { WORKSPACE_TOOLS, WorkspaceExecutor, normalizeWorkspace, startMcpGateway, type WriteApproval, type ActionApprovalRequest, type McpGateway } from './workspace-tools.js';
 import { AgentStore, type AgentProfile } from './agent-store.js';
@@ -69,6 +74,7 @@ configureProviderAuthRuntime({ paths,
 recoverAutomaticTeamCreation(paths.profileRoot);
 const settings = new SandSettingsStore(join(paths.profileRoot, 'settings.json'), {failOnCorrupt: true});
 const sessions = new LocalSessionStore(paths.profileRoot);
+const chatAttachments = new ChatAttachmentStore(paths.profileRoot);
 const agents = new AgentStore(paths.profileRoot);
 const policies = new PolicyStore(paths.profileRoot);
 const actionRules = new ActionRulesStore(paths.profileRoot);
@@ -123,6 +129,26 @@ const rabbit = new RabbitHost({store: rabbitStore, secrets, authorize: authorize
   },
 });
 
+const feedbackProofControllers = new Set<AbortController>();
+const feedback = new FeedbackMainAdapter({root: paths.profileRoot, agents, sessions, rabbit, rabbitStore,
+  defaultRoute: () => agents.list().flatMap(agent => connectionRoutes(agent))[0] ?? settings.getApiProviderProfiles().map(p => ({connectionId:p.id,model:p.model}))[0],
+  assertMutable: () => {if (quitting || quitPending || updatePending || credentialMutation) throw new Error('종료·업데이트·보안 저장 중에는 리포트 실행을 시작할 수 없습니다.');},
+  verifyRabbitMerge: async (job, run) => {
+    const input = feedbackGithubInput(job, run); if (!input) return;
+    const controller = new AbortController(); feedbackProofControllers.add(controller);
+    const timer = setTimeout(() => controller.abort(), 60_000); timer.unref();
+    try {
+      const tools = new AppConnectorTools({list: () => appConnectors.list(), grantRevision: id => appConnectors.grantRevision(id), read: (request, signal) => appConnectors.read(request, signal),
+        authorizeRead: (id, operation, args) => authorizeAction({path:'.',operation:'read',tool:'read_connected_app',category:'sensitive_disclosure',
+          reason:'리포트의 동일 PR·커밋 테스트와 실제 병합 여부를 GitHub에서 읽기 전용으로 확인합니다.',preview:JSON.stringify({app:id,operation,args}).slice(0,4000)},controller.signal,job.sessionId),
+      },controller.signal);
+      return feedbackGithubProofResponse(await tools.execute('read_connected_app',{id:'github',operation:'read_feedback_pr_verification',args:input},'feedback-proof-'+randomUUID()));
+    } finally {clearTimeout(timer);controller.abort();feedbackProofControllers.delete(controller);}
+  },
+  isSessionBusy: id => liveSessions.has(id) || unsavedSessions.has(id) || taskQueue.state().running.includes(id) || taskQueue.state().queued.includes(id),
+  changed: snapshot => emit({type:'feedback',snapshot}),
+});
+
 const appConnectors = new AppConnectorManager({root: paths.profileRoot, secrets, openExternal: url => shell.openExternal(url),
   changed: () => emit({type: 'app-connectors-changed', appConnectors: appConnectors.list()}),
   assertMutable: ownSecretMutation => {
@@ -168,7 +194,7 @@ routineHost = new RoutineHost({sessions, agents, teams: teamStore, coordinator: 
 });
 const routineScheduler = new RoutineScheduler(routines, routineHost, {onError: reportRoutineError});
 function reportRoutineError(error: unknown): void {routineError = safeError(error); emit({type: 'routine-error', error: routineError});}
-function startRoutines(): void {if (!quitting && !quitPending && !updatePending) void routineScheduler.start().catch(reportRoutineError);}
+function startRoutines(): void {if (!quitting && !quitPending && !updatePending) {void routineScheduler.start().catch(reportRoutineError); feedback.host.start();}}
 function saveRoutine(request: SaveRoutineRequest) {
   const input = normalizeRoutineInput(request.routine);
   if (!routineHost.validateTarget(input.target)) throw new Error('루틴의 에이전트 또는 팀을 선택하세요.');
@@ -251,7 +277,7 @@ function developmentConfigurationRevision(binding: DevelopmentBinding | undefine
 function assertDevelopmentConfigurationCurrent(binding: DevelopmentBinding | undefined, revision: string | undefined): void {
   if (developmentConfigurationRevision(binding) !== revision) throw new Error('모델 확인 중 개발 대상 Rabbit 연결이 변경되었습니다. 최신 연결을 확인한 뒤 다시 저장하세요.');
 }
-function assertIdle(): void { if (activeRun || taskQueue.state().running.length || taskQueue.state().queued.length || teamStore.activeRunCount() || avatarJobs.active().length || rabbit.isBusy() || appConnectors.isBusy() || testing) throw new Error('진행 중이거나 대기 중인 작업을 마치거나 중단한 뒤 다시 시도하세요.'); }
+function assertIdle(): void { if (activeRun || taskQueue.state().running.length || taskQueue.state().queued.length || teamStore.activeRunCount() || avatarJobs.active().length || rabbit.isBusy() || feedback.host.isBusy() || appConnectors.isBusy() || testing) throw new Error('진행 중이거나 대기 중인 작업을 마치거나 중단한 뒤 다시 시도하세요.'); }
 function configurationRevision(): string { return JSON.stringify(settings.getApiProviderProfiles()); }
 function assertConfigurationCurrent(revision: string, previousAgent?: AgentProfile, ownCredentialMutation = false): void {
   if (quitPending || quitting || updatePending) throw new Error('종료 또는 업데이트 준비 중에는 설정을 저장할 수 없습니다.');
@@ -278,14 +304,14 @@ function cancelSession(id: string): boolean {
 }
 function settleJob(id: string, error?: unknown): void { const hooks = jobHooks.get(id); jobHooks.delete(id); hooks?.settled(readSession(id), error); }
 function state() {
-  return { appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
+  return { feedback: feedback.host.snapshot(), appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
 }
-function enqueueSession(sessionId: string, text: string, hooks?: {started(): void; settled(session: ChatSession, error?: unknown): void}, operation = run): {started: boolean; queued: boolean; sessionId: string} {
+function enqueueSession(sessionId: string, text: string, hooks?: {started(): void; settled(session: ChatSession, error?: unknown): void}, operation = run, attachments?:ChatAttachment[]): {started: boolean; queued: boolean; sessionId: string} {
   const session = readSession(sessionId), queue = taskQueue.state();
   if (queue.running.includes(sessionId) || queue.queued.includes(sessionId)) throw new Error('이 작업은 이미 실행 중이거나 대기 중입니다.');
   if (queue.queued.length >= 16) throw new Error('대기 작업은 최대 16개입니다. 기존 작업을 마치거나 중단하세요.');
   if (session.automation && !session.teamRunId) session.policySnapshot = policies.get(session.automation.policyId);
-  session.taskStatus = 'queued'; session.queuedPrompt = text; saveSession(session); emit({type: 'session', session});
+  const queuedAttachments=attachments ?? (session.teamRunId ? teams.attachmentsFor(sessionId) : []);if(queuedAttachments.length)session.queuedAttachments=queuedAttachments;else delete session.queuedAttachments; session.taskStatus = 'queued'; session.queuedPrompt = text; saveSession(session); emit({type: 'session', session});
   if (hooks) jobHooks.set(sessionId, hooks);
   const position = taskQueue.submit(sessionId, async signal => {
     const controller = new AbortController(), abort = () => controller.abort(); signal.addEventListener('abort', abort, {once: true}); if (signal.aborted) controller.abort();
@@ -295,7 +321,7 @@ function enqueueSession(sessionId: string, text: string, hooks?: {started(): voi
     finally {
       signal.removeEventListener('abort', abort); if (activeRun?.controller === controller) activeRun = null;
       try { settleJob(sessionId, failure ?? (unsavedSessions.has(sessionId) ? new Error('작업 결과를 저장하지 못했습니다. 내보내기로 보관하세요.') : undefined)); }
-      finally { liveSessions.delete(sessionId); }
+      finally { liveSessions.delete(sessionId); feedback.host.sync(); }
     }
   });
   return {started: position === 'running', queued: position === 'queued', sessionId};
@@ -480,9 +506,10 @@ function authorizeAction(request: ActionApprovalRequest, signal: AbortSignal, se
 async function run(sessionId: string, text: string, controller: AbortController): Promise<void> {
   const session = readSession(sessionId);
   liveSessions.set(sessionId, session);
+  const attachments=session.queuedAttachments;delete session.queuedAttachments;
   session.taskStatus = 'running'; delete session.queuedPrompt;
   const now = new Date().toISOString();
-  const user: ChatMessage = { id: randomUUID(), role: 'user', text, createdAt: now, status: 'completed' };
+  const user: ChatMessage = {...(attachments?.length?{attachments}:{}), id: randomUUID(), role: 'user', text, createdAt: now, status: 'completed' };
   const answer: ChatMessage = { id: randomUUID(), role: 'assistant', text: '', createdAt: now, status: 'running' };
   session.messages.push(user, answer);
   if (session.messages.length === 2 && !session.teamRunId) session.title = text.replace(/\s+/g, ' ').slice(0, 45);
@@ -587,11 +614,21 @@ async function run(sessionId: string, text: string, controller: AbortController)
       persist(); emit({type: 'session', session});
     } else if (session.routeSelection) answer.routeSelection = structuredClone(session.routeSelection);
     const efficiency = session.routeSelection?.efficiency;
+    let omittedPolicyTurns = 0;
     if (efficiency) {
       const bounded = boundPolicyHistory(history, efficiency); history = bounded.messages;
-      systemInstructions = [systemInstructions, efficiencyInstructions(efficiency, bounded.omittedTurns)].filter(Boolean).join('\n\n');
+      omittedPolicyTurns = bounded.omittedTurns;
     }
     if (JSON.stringify(history).length > 500_000) throw new Error('대화가 너무 길어졌습니다. 새 대화에서 이어가세요. 현재 이력은 저장되어 있습니다.');
+    // Resolve only selected completed turns after policy trimming; immutable copies are hash-checked before provider access.
+    const completedUsers:ChatMessage[]=[];completedHistory(session,user.id,m=>{completedUsers.push(m);return m.text;});
+    const selectedUsers=completedUsers.slice(-history.filter(m=>m.role==='user').length);let userIndex=0;
+    history=history.map(message=>message.role==='user'?{...message,content:chatAttachments.content(selectedUsers[userIndex]!.text,selectedUsers[userIndex++]!.attachments)}:message);
+    if (efficiency) {
+      const bounded = boundPolicyHistory(history, efficiency); history = bounded.messages;
+      systemInstructions = [systemInstructions, efficiencyInstructions(efficiency, omittedPolicyTurns + bounded.omittedTurns)].filter(Boolean).join('\n\n');
+    }
+    if(JSON.stringify(history).length>24*1024*1024)throw Error('첨부 문맥이 너무 큽니다. 새 대화에서 필요한 파일만 첨부해 주세요.');
     if (session.workspacePath) executor = new WorkspaceExecutor(session.workspacePath, approve, controller.signal, authorizeWorkspace);
     const tools = [...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
     const routes = connectionRoutes(session);
@@ -714,7 +751,7 @@ async function installUpdate(): Promise<{restarting: true}> {
   if (updatePending || quitPending || quitting) throw new Error('이미 업데이트 또는 종료를 준비하고 있습니다.');
   if (updater.state().phase === 'development') throw new Error('개발 앱에서는 운영 앱 업데이트를 설치하지 않습니다.');
   if (updater.state().phase !== 'available') throw new Error('설치할 업데이트를 먼저 확인하세요.');
-  assertUpdateIdle(); updatePending = true; routineScheduler.stop();
+  assertUpdateIdle(); updatePending = true; routineScheduler.stop(); feedback.host.stop();
   let prepared: Awaited<ReturnType<LocalUpdater['prepare']>> | undefined;
   try {
     const statuses = await authStatus();
@@ -743,6 +780,13 @@ async function request(method: string, raw: unknown): Promise<unknown> {
   const args = raw == null ? {} : object(raw);
   switch (method) {
     case 'state': return state();
+    case 'listFeedback': return feedback.host.snapshot();
+    case 'submitFeedback': return feedback.host.submit(args);
+    case 'refreshFeedback': return feedback.host.refresh(string(args.id, 100));
+    case 'openFeedbackAgent': {const result=feedback.host.openAgent();emit({type:'teams',teams:teamStore.listTeams(),agents:agents.list()});return result;}
+    case 'saveFeedbackConfiguration': return feedback.saveConfiguration(args as unknown as FeedbackBinding);
+    case 'stageChatAttachments': return chatAttachments.stage(args.files as {name:unknown;bytes:unknown}[]);
+    case 'selectChatAttachments': {if(!window)return [];const selected=await dialog.showOpenDialog(window,{title:'메시지 첨부',properties:['openFile','multiSelections'],filters:[{name:'이미지·텍스트·코드',extensions:['png','jpg','jpeg','webp','gif','txt','md','csv','json','ts','tsx','js','py','log','yaml','yml','xml']}]});if(selected.canceled)return [];if(updatePending||quitPending||quitting)throw Error('종료·업데이트 준비 중에는 첨부를 저장할 수 없습니다.');return chatAttachments.select(selected.filePaths);}
     case 'appConnectorsList': return appConnectors.list();
     case 'appConnectorsConfigure': return appConnectors.configure(args as unknown as ConfigureAppConnectorInput);
     case 'appConnectorsConnect': {
@@ -969,11 +1013,11 @@ async function request(method: string, raw: unknown): Promise<unknown> {
     case 'deleteTeam': { teamStore.removeTeam(string(args.id)); return state(); }
     case 'startTeamRun': {
       if (testing) throw new Error('연결 확인 후 팀 작업을 시작하세요.');
-      const team = teamStore.getTeam(string(args.teamId)); return teams.start(team.id, string(args.goal, 8000), team.memberAgentIds.map(id => agents.get(id)), args.contextRunId == null ? undefined : string(args.contextRunId));
+      const team = teamStore.getTeam(string(args.teamId)); return teams.start(team.id, string(args.goal, 8000), team.memberAgentIds.map(id => agents.get(id)), args.contextRunId == null ? undefined : string(args.contextRunId), undefined, chatAttachments.resolve(args.attachmentIds));
     }
     case 'getTeamRun': return teams.detail(string(args.id));
     case 'cancelTeamRun': return teams.cancel(string(args.id));
-    case 'postTeamMessage': return teams.postUser(string(args.runId), string(args.text, 8000), args.toAgentId == null || args.toAgentId === '' ? undefined : string(args.toAgentId));
+    case 'postTeamMessage': return teams.postUser(string(args.runId), string(args.text, 8000), args.toAgentId == null || args.toAgentId === '' ? undefined : string(args.toAgentId),chatAttachments.resolve(args.attachmentIds));
     case 'deleteTeamRun': { teamStore.removeRun(string(args.id)); return state(); }
     case 'exportTeamRun': {
       if (!window) return {saved: false}; const run = teams.detail(string(args.id));
@@ -1011,8 +1055,8 @@ async function request(method: string, raw: unknown): Promise<unknown> {
       const sessionId = string(args.sessionId); const session = readSession(sessionId);
       if (session.purpose === 'avatar') throw new Error('프로필 그림 생성 작업입니다. 에이전트 편집 화면에서 다시 생성하세요.');
       if (session.teamRunId) throw new Error('팀에서 관리하는 작업입니다. 팀 대화방에 메시지를 보내거나 새 팀 작업을 시작하세요.');
-      const text = string(args.text, 100_000).trim(); if (!text) throw new Error('메시지를 입력하세요.');
-      return enqueueSession(sessionId, text);
+      const attachments=chatAttachments.resolve(args.attachmentIds);const text = string(args.text, 100_000).trim() || (attachments.length?'첨부한 자료를 확인해 주세요.':''); if (!text) throw new Error('메시지를 입력하세요.');
+      return enqueueSession(sessionId, text,undefined,run,attachments);
     }
     case 'cancel': {
       const id = args.sessionId == null ? activeRun?.sessionId : string(args.sessionId); if (!id) return {cancelled: false};
@@ -1032,7 +1076,8 @@ function exportPrivate(path: string, content: string): void {
   app.on('second-instance', () => { if (window?.isMinimized()) window.restore(); window?.focus(); });
   app.on('window-all-closed', () => app.quit());
   const prepareQuit = async (): Promise<void> => {
-    quitPending = true; boundedQuitReady = false; routineScheduler.stop();
+    quitPending = true; boundedQuitReady = false; routineScheduler.stop(); feedback.host.stop();
+    for (const controller of feedbackProofControllers) controller.abort();
     try {
       teams.stopForQuit();
       for (const job of avatarJobs.active()) cancelAvatarRequest(job.requestId);
@@ -1047,6 +1092,7 @@ function exportPrivate(path: string, content: string): void {
       const rabbitDrained = await rabbit.abortAndWait(4000);
       const drained = await taskQueue.waitForIdle(4000);
       if (!rabbitDrained) throw new Error('프로젝트 API 요청 정리가 아직 끝나지 않았습니다. 다시 종료하세요.');
+      if (feedback.host.isBusy()) throw new Error('리포트 상태 저장이 아직 끝나지 않았습니다. 잠시 뒤 다시 종료하세요.');
       if (!drained) {
         if (window && !window.isDestroyed()) await dialog.showMessageBox(window, {type: 'warning', title: '작업 중단 확인', message: '작업이 아직 종료되지 않았습니다.', detail: '응답과 파일 작업 정리가 끝난 뒤 다시 종료하세요.', buttons: ['앱으로 돌아가기'], defaultId: 0, cancelId: 0});
         return;

@@ -6,10 +6,11 @@ export function ConnectionAttempts({ attempts, connectionName }: { attempts: Con
  return <div className="connection-attempts bg-background-base-subtle rounded-lg"><div className="typo-l1/m text-glyph-gray-description">실제 연결 시도</div><ol aria-label="실제 연결 시도">{attempts.map((attempt,index)=><li key={index}><div className="attempt-heading typo-l1/r text-glyph-gray-body"><span>{index+1}. {connectionName(attempt.connectionId)} · {attempt.model}{attempt.effort ? ` · ${attempt.effort}` : ''}</span><Badge kind={attempt.status==='failed'?'destructive':attempt.status==='completed'?'success':'common'}>{attempt.status==='failed'?'실패':attempt.status==='completed'?'응답 완료':'시도 중'}</Badge></div>{attempt.error&&<p className="attempt-error typo-l2/r text-glyph-danger-body">{attempt.error}</p>}</li>)}</ol></div>;
 }
 const kinds:Record<string,string>={routine:'반복 작업',standard:'일반 작업',complex:'복잡한 작업'};
-export function MessageHeader({message,connectionName}:{message:Message;connectionName(id:string):string}){
+export function MessageHeader({message,connectionName,assistantName='벤디트봇'}:{message:Message;connectionName(id:string):string;assistantName?:string}){
  const [details,setDetails]=React.useState<'policy'|'connections'|null>(null);
  const selection=message.routeSelection,attempts=message.attempts??[],last=attempts.at(-1),failed=attempts.filter(item=>item.status==='failed').length;
- return <><div className="message-heading typo-b3/sb text-glyph-gray-heading"><span>{message.role==='user'?'나':'벤디트봇'}</span>
+ if(message.role==='user')return null;
+ return <><div className="message-heading typo-b3/sb text-glyph-gray-heading"><span>{assistantName}</span>
  {message.role==='assistant'&&<Button kind="common" hierarchy="secondary" size="xsmall" aria-haspopup="dialog" onPress={()=>setDetails('policy')}>작업 정책</Button>}
  {message.status==='cancelled'&&<Badge kind="warning">중단됨</Badge>}{message.status==='failed'&&<Badge kind="destructive">응답 실패</Badge>}
  {message.role==='assistant'&&attempts.length>0&&<div className="message-attempt-tag"><Button kind={failed?'destructive':'common'} hierarchy="secondary" size="xsmall" aria-haspopup="dialog" aria-label={`실제 연결 시도 ${attempts.length}회${failed?`, 실패 ${failed}회`:''} 상세`} onPress={()=>setDetails('connections')}>연결 {attempts.length}회 · {last?.status==='running'?'시도 중':last?.status==='completed'?'응답 완료':'실패'}{failed?` · 실패 ${failed}`:''}</Button></div>}</div>

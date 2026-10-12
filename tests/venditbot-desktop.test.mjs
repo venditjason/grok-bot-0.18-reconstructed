@@ -379,7 +379,10 @@ test('first-instance restart recovers interrupted messages/tools without rerunni
   assert.equal(state.activeRun, null); assert.equal(state.profiles.length, 0);
   assert.equal(state.sessions[0].messages[1].status, 'failed'); assert.equal(state.sessions[0].messages[1].text, '부분 응답');
   assert.equal(state.sessions[0].messages[1].tools[0].status, 'failed');
-  assert.equal(f.events.length, 0); assert.deepEqual(JSON.parse(await readFile(path.join(f.profileRoot, 'conversations.json'), 'utf8')).sessions, state.sessions);
+  // Initial feedback metadata is read-only; no recovered chat, approval or provider action may be emitted.
+  assert.equal(f.events.filter(event=>event.type!=='feedback').length, 0);
+  for(const event of f.events)assert.deepEqual(event.snapshot.jobs,[]);
+  assert.deepEqual(JSON.parse(await readFile(path.join(f.profileRoot, 'conversations.json'), 'utf8')).sessions, state.sessions);
 });
 
 test('native folder/export dialogs constrain selected workspaces and atomically export private files', async t => {
@@ -1700,4 +1703,25 @@ for(const kind of ['agent','automatic team'])test(`Rabbit target changes during 
  }finally{await writeFile(release,'release');}
  const result=await pending;assert.equal(result.ok,false);assert.match(result.error,/개발 대상 Rabbit 연결이 변경/);
  const state=await f.call('state');assert.equal(state.agents.length,0);assert.equal(state.teams.length,0);assert.equal(state.policies.length,0);assert.deepEqual(api.failures,[]);
+});
+
+test('desktop picker and drop staging send real image/text bytes, retain message metadata and reject unsupported drafts before provider calls',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:false,images:true,structuredOutput:false}}),session=await f.call('createSession',{connectionId:selected.id});
+ const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4V8AAAAASUVORK5CYII=','base64');
+ const [image]=await f.call('stageChatAttachments',{files:[{name:'chart.png',bytes:[...png]}]});const original=path.join(f.root,'note.txt');await writeFile(original,'PINNED_DOCUMENT_CONTENT');f.openResults.push({canceled:false,filePaths:[original]});const [document]=await f.call('selectChatAttachments');await writeFile(original,'CHANGED_ORIGINAL_MUST_NOT_SEND');
+ await f.denied('stageChatAttachments',{files:[{name:'draft.pdf',bytes:[37,80,68,70]}]},/지원/);assert.equal(api.requests.length,0);
+ api.enqueue(({response})=>finish(response,'received'));const end=f.event(e=>e.type==='run-end'&&e.sessionId===session.id);await f.call('send',{sessionId:session.id,text:'review',attachmentIds:[image.id,document.id]});await end;
+ const parts=api.requests[0].body.messages.find(m=>m.role==='user').content;assert.equal(parts.find(p=>p.type==='image_url').image_url.url,'data:image/png;base64,'+png.toString('base64'));assert.match(plain(parts),/PINNED_DOCUMENT_CONTENT/);assert.doesNotMatch(plain(parts),/CHANGED_ORIGINAL/);
+ assert.deepEqual((await f.session(session.id)).messages[0].attachments,[image,document]);const saved=JSON.parse(await readFile(path.join(f.profileRoot,'conversations.json'),'utf8'));assert.deepEqual(saved.sessions[0].messages[0].attachments,[image,document]);
+ f.openResults.push({canceled:true,filePaths:[]});assert.deepEqual(await f.call('selectChatAttachments'),[]);
+});
+
+test('feedback IPC persists one blocked outbox receipt, rejects spoofed fields, and opens one fixed report agent',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api),request={requestId:randomUUID(),kind:'bug',title:'Synthetic attachment issue',description:'No real provider or development action.'};
+ assert.deepEqual((await f.call('listFeedback')).jobs,[]);
+ await f.denied('submitFeedback',{...request,status:'merged'},/입력|ID|종류/);
+ await f.call('submitFeedback',request);await nextTurn();const first=await f.call('listFeedback');assert.equal(first.jobs.length,1);assert.equal(first.jobs[0].status,'blocked');assert.equal(first.configured,false);
+ await f.call('submitFeedback',request);assert.equal((await f.call('listFeedback')).jobs.length,1);assert.equal((await f.call('refreshFeedback',{id:request.requestId})).status,'blocked');
+ const agent=await f.call('openFeedbackAgent'),again=await f.call('openFeedbackAgent');assert.deepEqual(agent,again);const state=await f.call('state');assert.equal(state.feedback.jobs[0].id,request.requestId);assert.equal(state.agents.find(a=>a.id===agent.agentId).name,'리포트');assert.equal(state.sessions.find(s=>s.id===agent.sessionId).connectionId,selected.id);assert.equal(state.sessions.filter(s=>s.id===agent.sessionId).length,1);
+ const stored=JSON.parse(await readFile(path.join(f.profileRoot,'feedback-jobs.json'),'utf8'));assert.equal(JSON.stringify(stored).includes(request.requestId),true);assert.deepEqual(api.failures,[]);
 });

@@ -18,6 +18,8 @@ function elements(node) { return Array.isArray(node) ? node.flatMap(elements) : 
 function text(node) { return Array.isArray(node) ? node.map(text).join('') : React.isValidElement(node) ? text(node.props.children) : typeof node === 'string' || typeof node === 'number' ? String(node) : ''; }
 const button = (tree, label) => elements(tree).find(node => node.props.onPress && text(node) === label);
 const component = (tree, name) => elements(tree).find(node => node.type?.name === name);
+// Exercise the real App callbacks at the shared composer boundary; its DOM/keyboard behavior has a separate component suite.
+const composer = tree => { const node = component(tree, 'ChatComposer'); assert.ok(node, 'agent ChatComposer is rendered'); assert.equal(node.props.label, '메시지'); return node.props; };
 const agent = { id: 'agent', name: '내 에이전트', instructions: '역할', connectionId: 'api', model: 'fixture', createdAt: '2026-01-01', updatedAt: '2026-01-01' };
 const team = { id: 'team', name: '내 팀', instructions: '', topic: '', policies: '', leaderAgentId: agent.id, memberAgentIds: [agent.id], rounds: 1, createdAt: '2026-01-01', updatedAt: '2026-01-01' };
 const session = (id, extra = {}) => ({ id, title: id, agentId: agent.id, connectionId: 'api', model: 'fixture', messages: [], createdAt: '2026-01-01', updatedAt: '2026-01-01', ...extra });
@@ -31,12 +33,12 @@ test('agent sidebar immediately opens its latest ordinary chat, keeps drafts, an
   const render = fixture({ ...state, sessions: [session('normal'), session('newer-team', { teamRunId: 'run', updatedAt: '2026-01-03' }), session('newer-avatar', { purpose: 'avatar', updatedAt: '2026-01-04' })] });
   let tree = render(); navClick(tree, '에이전트 목록', agent.name); tree = render();
   assert.ok(button(tree, '에이전트 설정')); assert.equal(component(tree, 'TeamChat'), undefined);
-  let input = elements(tree).find(node => node.props['aria-label'] === '메시지'); input.props.onChange({ target: { value: '일반 대화에서 계속' } }); tree = render();
+  composer(tree).onChange('일반 대화에서 계속'); tree = render();
   const calls = []; invoke = async (method, args) => { calls.push([method, args]); return method === 'createSession' ? session('created') : {}; };
-  button(tree, '보내기').props.onPress(); await tick(); assert.deepEqual(calls, [['send', { sessionId: 'normal', text: '일반 대화에서 계속' }]]);
+  composer(tree).onSend(); await tick(); assert.deepEqual(calls, [['send', { sessionId: 'normal', text: '일반 대화에서 계속' }]]);
   tree = render(); button(elements(tree).find(node => node.type === 'header'), '새 대화').props.onPress(); tree = render();
   assert.equal(calls.length, 1);
-  input = elements(tree).find(node => node.props['aria-label'] === '메시지'); input.props.onChange({ target: { value: '첫 요청' } }); tree = render(); button(tree, '보내기').props.onPress(); await tick();
+  composer(tree).onChange('첫 요청'); tree = render(); composer(tree).onSend(); await tick();
   assert.deepEqual(calls.slice(1), [['createSession', { agentId: agent.id }], ['send', { sessionId: 'created', text: '첫 요청' }]]);
 });
 
@@ -76,10 +78,10 @@ test('sidebar update actions use the update IPC and work blocks installation bef
 test('unsent agent and team messages survive renderer restart and update without being sent', async () => {
   const disk = memoryStorage(), snapshot = { ...state, update: { phase: 'available', currentVersion: '0.2.0', version: '0.2.1' } };
   let render = fixture(snapshot, disk), tree = render(); navClick(tree, '에이전트 목록', agent.name); tree = render();
-  elements(tree).find(node => node.props['aria-label'] === '메시지').props.onChange({ target: { value: '아직 보내지 않은 개인 작업' } });
+  composer(tree).onChange('아직 보내지 않은 개인 작업');
   tree = render(); navClick(tree, '협업 팀 목록', team.name); tree = render(); component(tree, 'TeamChat').props.onPrompt('아직 보내지 않은 팀 작업'); tree = render();
   const calls = []; invoke = async method => { calls.push(method); return snapshot; }; component(tree, 'UpdateControl').props.onInstall(); await tick(); assert.deepEqual(calls, ['installUpdate', 'state']);
-  render = fixture(snapshot, disk); tree = render(); assert.match(text(tree), /초안 2개/); navClick(tree, '에이전트 목록', agent.name); tree = render(); assert.equal(elements(tree).find(node => node.props['aria-label'] === '메시지').props.value, '아직 보내지 않은 개인 작업');
+  render = fixture(snapshot, disk); tree = render(); assert.match(text(tree), /초안 2개/); navClick(tree, '에이전트 목록', agent.name); tree = render(); assert.equal(composer(tree).value, '아직 보내지 않은 개인 작업');
   navClick(tree, '협업 팀 목록', team.name); tree = render(); assert.equal(component(tree, 'TeamChat').props.prompt, '아직 보내지 않은 팀 작업');
 });
 
@@ -94,7 +96,7 @@ test('agent role, image prompt, and team settings recover with the original conf
 
 test('draft write failure and unsaved API keys block installation without placing secrets in storage', async () => {
   const disk = memoryStorage(), snapshot = { ...state, update: { phase: 'available', currentVersion: '0.2.0', version: '0.2.1' } };
-  let render = fixture(snapshot, disk), tree = render(); disk.setItem = () => { throw new Error('quota'); }; elements(tree).find(node => node.props['aria-label'] === '메시지').props.onChange({ target: { value: '저장에 실패한 초안' } }); tree = render();
+  let render = fixture(snapshot, disk), tree = render(); disk.setItem = () => { throw new Error('quota'); }; composer(tree).onChange('저장에 실패한 초안'); tree = render();
   let calls = 0; invoke = async () => { calls++; }; assert.match(component(tree, 'UpdateControl').props.blockedReason, /초안/); component(tree, 'UpdateControl').props.onInstall(); await tick(); assert.equal(calls, 0); assert.match(text(render()), /저장하지 못했습니다/);
   const cleanDisk = memoryStorage(); render = fixture(snapshot, cleanDisk); tree = render(); button(tree, '설정').props.onPress(); tree = render(); elements(tree).find(node => node.props.label === 'API 키').props.onChange({ target: { value: 'secret-unsaved-key' } }); tree = render();
   calls = 0; invoke = async () => { calls++; }; assert.match(component(tree, 'UpdateControl').props.blockedReason, /연결 설정/); component(tree, 'UpdateControl').props.onInstall(); await tick(); assert.equal(calls, 0); assert.doesNotMatch(JSON.stringify([...cleanDisk.values]), /secret-unsaved-key/);
@@ -118,9 +120,9 @@ test('failed fresh team chat follow-up never sends context from an unrelated com
 
 test('installation rechecks draft durability even if storage fails only after the last input', async () => {
   const disk = memoryStorage(), snapshot = { ...state, update: { phase: 'available', currentVersion: '0.2.0', version: '0.2.1' } }, render = fixture(snapshot, disk);
-  let tree = render(); elements(tree).find(node => node.props['aria-label'] === '메시지').props.onChange({ target: { value: '업데이트 전 저장된 초안' } }); tree = render(); assert.equal(component(tree, 'UpdateControl').props.blockedReason, undefined);
+  let tree = render(); composer(tree).onChange('업데이트 전 저장된 초안'); tree = render(); assert.equal(component(tree, 'UpdateControl').props.blockedReason, undefined);
   disk.setItem = () => { throw new Error('disk became unavailable'); }; let calls = 0; invoke = async () => { calls++; }; component(tree, 'UpdateControl').props.onInstall(); await tick();
-  assert.equal(calls, 0); tree = render(); assert.match(text(tree), /업데이트를 시작하지 않았습니다/); assert.equal(elements(tree).find(node => node.props['aria-label'] === '메시지').props.value, '업데이트 전 저장된 초안');
+  assert.equal(calls, 0); tree = render(); assert.match(text(tree), /업데이트를 시작하지 않았습니다/); assert.equal(composer(tree).value, '업데이트 전 저장된 초안');
 });
 
 test('API secure-storage timeout clears test busy state, shows the original error, and preserves unsaved connection input', async () => {
@@ -340,4 +342,40 @@ test('agent default and per-team Rabbit project settings reach save IPC and surv
   tree = render(); navClick(tree, '협업 팀 목록', team.name); tree = render(); button(tree, '팀 설정').props.onPress(); tree = render(); const editor = component(tree, 'TeamEditor'); editor.props.onChange({ ...editor.props.draft, development });
   render = fixture(snapshot, disk); tree = render(); button(tree, '초안 보기').props.onPress(); tree = render(); component(tree, 'DraftRecovery').props.onTeam(team.id); tree = render(); assert.deepEqual(component(tree, 'TeamEditor').props.draft.development, development);
   invoke = async (method, args) => { saved = [method, args]; return { ...snapshot, teams: [{ ...team, ...args.team }] }; }; component(tree, 'TeamEditor').props.onSave(); await tick(); assert.equal(saved[0], 'saveTeam'); assert.deepEqual(saved[1].team.development, development);
+});
+
+const appAttachmentA={id:'11111111-1111-4111-8111-111111111111',name:'submitted.txt',kind:'text',mimeType:'text/plain',bytes:4,sha256:'a'.repeat(64)};
+const appAttachmentB={...appAttachmentA,id:'22222222-2222-4222-8222-222222222222',name:'next.txt'};
+const attachmentList=tree=>elements(tree).find(n=>n.type?.name==='AttachmentList'&&n.props.onRemove);
+test('new agent conversation keeps newly staged attachment beside the later draft after first send completes',async()=>{
+ const render=fixture();let tree=render();navClick(tree,'에이전트 목록',agent.name);tree=render();
+ let finish;const calls=[];invoke=async(method,args)=>{calls.push([method,args]);if(method==='selectChatAttachments')return calls.filter(c=>c[0]===method).length===1?[appAttachmentA]:[appAttachmentB];if(method==='createSession')return new Promise(resolve=>finish=resolve);return {};};
+ composer(tree).onChooseAttachments();await tick();tree=render();composer(tree).onChange('first');tree=render();composer(tree).onSend();await tick();
+ tree=render();composer(tree).onChange('next draft');tree=render();composer(tree).onChooseAttachments();await tick();tree=render();assert.deepEqual(attachmentList(tree).props.files,[appAttachmentA,appAttachmentB]);
+ finish(session('created'));await tick();tree=render();assert.equal(composer(tree).value,'next draft');assert.deepEqual(calls.find(c=>c[0]==='send')[1].attachmentIds,[appAttachmentA.id]);
+ assert.deepEqual(attachmentList(tree).props.files,[appAttachmentB]);
+});
+test('new team run keeps newly staged attachment beside the later draft after accepted send',async()=>{
+ const render=fixture({...state,teamRuns:[]});let tree=render();navClick(tree,'협업 팀 목록',team.name);tree=render();let finish;let picks=0;
+ invoke=async(method,args)=>{if(method==='selectChatAttachments')return ++picks===1?[appAttachmentA]:[appAttachmentB];if(method==='startTeamRun')return new Promise(resolve=>finish=resolve);return {};};
+ component(tree,'TeamChat').props.onChooseAttachments();await tick();tree=render();component(tree,'TeamChat').props.onPrompt('first');tree=render();component(tree,'TeamChat').props.onSend();await tick();
+ tree=render();component(tree,'TeamChat').props.onPrompt('next draft');tree=render();component(tree,'TeamChat').props.onChooseAttachments();await tick();tree=render();assert.deepEqual(component(tree,'TeamChat').props.attachments,[appAttachmentA,appAttachmentB]);
+ finish({...completed,id:'created-run',status:'running'});await tick();tree=render();assert.equal(component(tree,'TeamChat').props.prompt,'next draft');assert.deepEqual(component(tree,'TeamChat').props.attachments,[appAttachmentB]);
+});
+test('reselecting the same agent or team increments the actual App composer focus request',()=>{
+ const render=fixture();let tree=render();navClick(tree,'에이전트 목록',agent.name);tree=render();const agentFocus=composer(tree).focusRequest;navClick(tree,'에이전트 목록',agent.name);tree=render();assert.ok(composer(tree).focusRequest>agentFocus);
+ navClick(tree,'협업 팀 목록',team.name);tree=render();const teamFocus=component(tree,'TeamChat').props.focusRequest;navClick(tree,'협업 팀 목록',team.name);tree=render();assert.ok(component(tree,'TeamChat').props.focusRequest>teamFocus);
+});
+
+test('a picker completing after first-session promotion never aliases a later new agent draft; a busy drop does not read or stage bytes',async()=>{
+ const render=fixture();let tree=render();navClick(tree,'에이전트 목록',agent.name);tree=render();
+ let finishCreate,finishPicker,picks=0,dropRead=false;const calls=[];const later={...appAttachmentA,id:'33333333-3333-4333-8333-333333333333',name:'separate-new-draft.txt'};
+ invoke=async(method,args)=>{calls.push([method,args]);if(method==='createSession')return new Promise(resolve=>finishCreate=resolve);if(method==='selectChatAttachments')return ++picks===1?new Promise(resolve=>finishPicker=resolve):[later];return {};};
+ composer(tree).onChange('first without attachments');tree=render();composer(tree).onSend();await tick();tree=render();composer(tree).onChooseAttachments();await tick();tree=render();
+ const main=elements(tree).find(n=>n.type==='main'),transfer={types:['Files'],files:[{name:'not-read.txt',size:4,arrayBuffer(){dropRead=true;return Promise.resolve(new ArrayBuffer(4));}}]};
+ main.props.onDragOver({dataTransfer:transfer,preventDefault(){}});assert.equal(transfer.dropEffect,'none');main.props.onDrop({dataTransfer:transfer,preventDefault(){}});await tick();assert.equal(dropRead,false);assert.ok(!calls.some(c=>c[0]==='stageChatAttachments'));
+ finishCreate(session('created'));await tick();tree=render();button(elements(tree).find(n=>n.type==='header'),'새 대화').props.onPress();tree=render();assert.deepEqual(attachmentList(tree).props.files,[]);
+ finishPicker([appAttachmentB]);await tick();tree=render();assert.deepEqual(attachmentList(tree).props.files,[]);composer(tree).onChooseAttachments();await tick();tree=render();assert.deepEqual(attachmentList(tree).props.files,[later]);
+ const stored=JSON.parse(window.localStorage.getItem('venditbot.drafts.v1.chat-attachments'));assert.deepEqual(stored['session:created'],[appAttachmentB]);assert.deepEqual(stored['agent:agent'],[later]);
+ navClick(tree,'에이전트 목록',agent.name);tree=render();assert.deepEqual(attachmentList(tree).props.files,[appAttachmentB]);assert.deepEqual(calls.find(c=>c[0]==='send'),['send',{sessionId:'created',text:'first without attachments'}]);
 });

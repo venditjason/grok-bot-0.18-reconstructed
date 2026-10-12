@@ -167,11 +167,11 @@ test('team conversation shows representative answers and keeps its composer afte
   const completed = { ...run, status: 'completed', finalSessionId: 'summary', steps: run.steps.map(step => ({ ...step, status: 'completed' })) };
   const summary = { ...session, id: 'summary', messages: [{ id: 'final', role: 'assistant', status: 'completed', text: '대표의 전체 최종 답변입니다.' }] };
   const html = render({ initialView: 'team', initialTeamId: 'team', initialTeamRunId: 'run', initialState: { ...state, teamRuns: [completed], sessions: [session, summary] }, initialTeamDetails: { run: { ...detail, ...completed } } });
-  assert.match(html, /팀 대표에게 메시지/); assert.match(html, /대표의 전체 최종 답변입니다/); assert.match(html, /이전 완료 대화를 이어서/);
+  assert.match(html, /팀 대표에게 메시지/); assert.match(html, /대표의 전체 최종 답변입니다/); assert.match(html, /<textarea[^>]*aria-label="팀 대표에게 메시지"/); assert.match(html, />입력<\/button>/);
   assert.match(html, /진행 상황 · 멤버 대화/); assert.match(html, /<button>팀 설정<\/button>/);
   assert.doesNotMatch(html, /aria-label="멤버 작업 진행"|팀 운영 지침|팀 작업 목표/);
   const active = render({ initialView: 'team', initialTeamId: 'team', initialTeamRunId: 'run', initialTeamDetails: { run: detail } });
-  assert.match(active, /추가 지시 보내기/); assert.match(active, /팀 작업 중단/); assert.match(active, /검토자에게 업무를 맡겼습니다/);
+  assert.match(active, />입력<\/button>/); assert.match(active, /추가 지시는 이후 대표·멤버 작업에 전달됩니다/); assert.match(active, /팀 작업 중단/); assert.match(active, /검토자에게 업무를 맡겼습니다/);
   assert.doesNotMatch(active, /현재 검토하고 있습니다/);
 });
 
@@ -269,7 +269,7 @@ test('update control distinguishes development, available, busy, installing and 
 test('failed fresh team chat does not claim it will inherit earlier completed context', () => {
   const failed = { ...run, status: 'failed', steps: [] };
   const html = render({ initialView: 'team', initialTeamId: team.id, initialTeamRunId: failed.id, initialState: { ...state, teamRuns: [failed] } });
-  assert.match(html, /요청을 수정해 다시 보낼 수 있습니다/); assert.doesNotMatch(html, /이전 완료 대화를 이어서/);
+  assert.match(html, /팀 작업을 완료하지 못했습니다/); assert.match(html, /<textarea[^>]*aria-label="팀 대표에게 메시지"/); assert.match(html, />입력<\/button>/); assert.doesNotMatch(html, /이전 완료 대화를 이어서/);
 });
 
 test('stored orphan drafts remain readable and updater presents an explicit draft blocking reason', async () => {

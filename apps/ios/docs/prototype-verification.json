@@ -1,0 +1,87 @@
+{
+  "project": "VenditBot iPhone Companion",
+  "checked_date": "2026-10-12",
+  "stage": "isolated_native_prototype",
+  "source_path": "apps/ios",
+  "app_store_publication_required": false,
+  "preferred_first_install": "Xcode Personal Team on the owner's iPhone; 7-day reprovisioning",
+  "local_environment": {
+    "developer_directory": "/Library/Developer/CommandLineTools",
+    "swift": "Apple Swift 6.4",
+    "xcode_present": false,
+    "iphoneos_sdk_present": false
+  },
+  "verification": {
+    "standalone_contract_checks": {
+      "status": "PASS",
+      "passed": 17,
+      "total": 17,
+      "exit_code": 0,
+      "runner": "scripts/check-local.sh",
+      "external_requests": false
+    },
+    "swiftui_and_keychain_typecheck": {
+      "status": "PASS",
+      "exit_code": 0,
+      "target": "arm64-apple-macosx14.0",
+      "sdk": "MacOSX26.5.sdk",
+      "note": "Static check only. This is not an iOS build or UI rendering test."
+    },
+    "xcode_project_plist_lint": "PASS",
+    "shared_scheme_xml_parse": "PASS",
+    "swift_package_xctest": {
+      "status": "BLOCKED",
+      "reason": "Installed Command Line Tools omit XCTest; identical assertion bodies passed with standalone Swift runner."
+    },
+    "ios_simulator_build": {
+      "status": "NOT_RUN",
+      "reason": "Xcode and iOS SDK absent"
+    },
+    "signed_iphone_install": {
+      "status": "NOT_RUN",
+      "reason": "Xcode/iOS SDK, Apple signing team, and connected device not configured"
+    },
+    "keychain_integration": "NOT_RUN",
+    "live_rabbit_integration": "NOT_RUN",
+    "remote_agent_team_commands": "NOT_IMPLEMENTED; local unsent drafts and share sheet only"
+  },
+  "implementation": [
+    "SwiftUI tabs: Rabbit run status, local agent/team instruction drafts, installation information",
+    "Read-only fixed GET /v1/runs/{UUID}; X-Project-API-Key",
+    "HTTPS origins only; redirect denial; scoped IDs and cursor; 1 MiB response cap",
+    "Ephemeral URLSession without cookies, cache or shared credential storage",
+    "Rabbit keys stored with Keychain WhenUnlockedThisDeviceOnly and scoped by server/project",
+    "All rendered remote text redacts exact key echoes",
+    "Staged connection settings; cancel preserves applied connection"
+  ],
+  "production_sources_modified": false,
+  "account_enrollment_purchase_or_device_pairing_performed": false,
+  "api_reference_revision": "a9f633e09d49a85829b8236331b9e21f7e612634",
+  "official_sources": [
+    "https://developer.apple.com/help/account/basics/about-your-developer-account",
+    "https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices",
+    "https://developer.apple.com/help/account/devices/devices-overview/",
+    "https://developer.apple.com/documentation/technotes/tn3125-inside-code-signing-provisioning-profiles",
+    "https://developer.apple.com/help/app-store-connect/test-a-beta-version/testflight-overview/",
+    "https://developer.apple.com/programs/",
+    "https://support.apple.com/guide/iphone/open-as-web-app-iphea86e5236/ios"
+  ],
+  "recorded_at": "2026-10-12T00:42:54.743632+00:00",
+  "source_file_sha256": {
+    ".gitignore": "f40b76119548f54a06f71769367264d6a6dd0403dcf67108a62a6616abe71311",
+    "App/TokenVault.swift": "ecd459118f48e7190dce7f14456ff2883706edfba7eb61f52020c8026b324470",
+    "App/VenditBotApp.swift": "0ac4feb9e5476fe3661292bff20d90e641cf399736fce4c862fb3e066920f7bb",
+    "Package.swift": "01ecd6b575273b011739cdd59369bc79bffcd4802a4e349251f7080a377929c5",
+    "README.md": "4654a1cf1929c0a75b3aa7444ecc1533168d25903421740760848690569ec59e",
+    "Sources/CompanionCore/RabbitClient.swift": "b99355e463b5409b9f53ab16b9b60f3468cf0d62f45adab8519b53f14bc19923",
+    "Sources/CompanionCore/RabbitContract.swift": "112770bbb0e9b7f7f18eca44c078a2c2369d1f3d031c86810a5e588cf38fc8ef",
+    "Tests/CompanionCoreTests/CompanionCoreTests.swift": "591ce578401244bbc2f7d6971f7f9642b3d1f80aec9bb3a448bae945de940a45",
+    "VenditBotCompanion.xcodeproj/project.pbxproj": "4e0689a727a725a0a2c668a5bdd14d087e2999bcb1b773a8ca2bf0928b2f2663",
+    "VenditBotCompanion.xcodeproj/xcshareddata/xcschemes/VenditBotCompanion.xcscheme": "cd417fbb210d13d593738c83486d0eae607d74d26eca99396af38fa889554ba3",
+    "docs/installation.md": "3ae3c9363e3018aa5d31a57abb5b04944c54251fcd3ff00c3d4302616df5fe31",
+    "docs/integration.md": "3f74dbebe0b7eed04bb23d684f6fd10fa2fb200bc9831d63c2b81cdc258618ab",
+    "scripts/ContractCheckRunner.swift": "deb41f00532407af975d5ec3d8de5bfd540ee2db44c2bd53dfe00d2c90b8959a",
+    "scripts/check-local.sh": "6b32d6c4bdeaab7f2caff4ff297c449b8e393cc2bd9eee210244d6767e4e1feb"
+  },
+  "source_path_note": "Original isolated prototype path omitted. Recorded checks and source hashes describe the prototype at recorded_at, before later repository documentation updates."
+}

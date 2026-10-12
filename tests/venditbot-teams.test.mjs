@@ -186,3 +186,14 @@ test('async model discovery cannot commit a delegation after cancellation and pr
   const nextPending = f.tools().execute('delegate_team_task', {agentId: f.worker.id, task: '경합 중 모델 조회'}, 'second'); await tick(); f.coordinator.postUser(next.id, '조회 중 추가된 사용자 지시'); secondGate.resolve(); await nextPending;
   assert.ok(f.coordinator.detail(next.id).messages.some(m => m.text === '조회 중 추가된 사용자 지시')); assert.equal(f.store.getRun(next.id).steps.length, 2);
 });
+
+test('team attachments are persisted, scoped by recipient and snapshotted without granting model attachment authority',async t=>{
+ const f=await fixture(t);const a={id:randomUUID(),name:'shared.txt',kind:'text',mimeType:'text/plain',bytes:4,sha256:'a'.repeat(64)},privateFile={...a,id:randomUUID(),name:'private.txt'};
+ const run=f.coordinator.start(f.team.id,'review files',f.team.memberAgentIds.map(id=>f.agents.get(id)),undefined,undefined,[a]);await tick();const leader=run.steps[0].sessionId;
+ assert.deepEqual(f.coordinator.attachmentsFor(leader),[a]);f.coordinator.postUser(run.id,'private evidence',f.worker.id,[privateFile]);
+ const work=await f.tools().execute('delegate_team_task',{agentId:f.worker.id,task:'review private evidence'},'attachment-delegation');
+ assert.deepEqual(f.coordinator.attachmentsFor(leader),[a]);assert.deepEqual(f.coordinator.attachmentsFor(work.sessionId),[a,privateFile]);
+ const read=f.coordinator.attachmentsFor(work.sessionId);read[0].name='changed';assert.equal(f.coordinator.attachmentsFor(work.sessionId)[0].name,'shared.txt');
+ assert.deepEqual(new TeamStore(f.root).getRun(run.id).messages.filter(m=>m.kind==='user').map(m=>m.attachments),[[a],[privateFile]]);
+ await assert.rejects(f.tools().execute('send_team_message',{text:'spoof',attachments:[privateFile]},'spoof-attachment'),/인자/);
+});

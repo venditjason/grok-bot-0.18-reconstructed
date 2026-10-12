@@ -1,6 +1,7 @@
 import {createServer} from 'node:http';
 import {createHash, randomBytes, timingSafeEqual} from 'node:crypto';
 import type {AppConnectorProvider} from '../../shared/app-connectors.js';
+import {SecureStorageError,secureStorageErrorMessage} from '../secure-storage-error.js';
 
 export class ConnectorError extends Error {}
 export function fail(message: string): never {throw new ConnectorError(message);}
@@ -20,7 +21,7 @@ export function oauthErrorMessage(code:unknown):string {
  };
  return typeof code==='string'&&Object.hasOwn(messages,code)?messages[code]!:'공식 앱 서버가 로그인 요청을 거절했습니다. 다시 시도하거나 관리자에게 연결 상태를 확인하세요.';
 }
-export const publicError = (error: unknown): string => error instanceof ConnectorError ? error.message : '앱 연결 요청을 완료하지 못했습니다. 연결 설정과 네트워크를 확인한 뒤 다시 시도하세요.';
+export const publicError = (error: unknown): string => error instanceof SecureStorageError ? secureStorageErrorMessage(error) : error instanceof ConnectorError ? error.message : '앱 연결 요청을 완료하지 못했습니다. 연결 설정과 네트워크를 확인한 뒤 다시 시도하세요.';
 export const abort = (signal: AbortSignal) => {if(signal.aborted) fail('앱 연결 요청을 취소했습니다.');};
 export function record(value: unknown): Record<string, unknown> {if(!value || typeof value!=='object' || Array.isArray(value)) return fail('앱 서버의 응답 형식을 확인할 수 없습니다.');return value as Record<string, unknown>;}
 export function text(value: unknown, max=4096): string {if(typeof value!=='string'||!value||value.length>max||/[\u0000-\u001f\u007f]/.test(value)) return fail('앱 연결 값의 형식을 확인하세요.');return value;}

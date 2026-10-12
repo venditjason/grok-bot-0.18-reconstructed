@@ -1,3 +1,4 @@
+import {readFeedbackGithubProof} from '../feedback-github-proof.js';
 import {randomUUID} from 'node:crypto';
 import {APP_CONNECTORS,appConnectorDefinition,appConnectorId,appConnectorProvider,type AppId,type AppConnectorProvider,type AppConnectorView,type AppConnectorTest,type ConfigureAppConnectorInput,type ConnectAppConnectorInput,type AppConnectorInput,type TestAppConnectorInput,type AppConnectorPhase,type AppDeviceAuthorization} from '../../shared/app-connectors.js';
 import type {EncryptedSecretStore} from '../local-store.js';
@@ -14,7 +15,7 @@ export type AppConnectorOptions={root:string;secrets:Secrets;openExternal:(url:s
 export type AppReadInput={id:AppId;operation:string;args?:Record<string,unknown>};
 const configKey=(provider:AppConnectorProvider)=>`VENDITBOT_APPS_CONFIG_${provider.toUpperCase()}`;
 const tokenKey=(id:AppId)=>`VENDITBOT_APPS_TOKEN_${id.toUpperCase()}`;
-const phases:Record<AppConnectorPhase,string>={discovering:'공식 로그인 서버를 확인하고 있습니다.',registering:'공식 서버에 앱 연결을 준비하고 있습니다.',opening_browser:'기본 브라우저에서 공식 로그인을 열고 있습니다.',awaiting_consent:'브라우저에서 로그인과 연결 승인을 완료하세요.',exchanging_token:'공식 로그인 응답을 확인하고 있습니다.',saving_credential:'이 기기에 연결을 안전하게 저장하고 있습니다.',checking_connection:'공식 서버 연결을 검사하고 있습니다.'};
+const phases:Record<AppConnectorPhase,string>={reading_registration:'저장된 앱 등록 정보를 macOS 보안 저장소에서 확인하고 있습니다.',discovering:'공식 로그인 서버를 확인하고 있습니다.',registering:'공식 서버에 앱 연결을 준비하고 있습니다.',opening_browser:'기본 브라우저에서 공식 로그인을 열고 있습니다.',awaiting_consent:'브라우저에서 로그인과 연결 승인을 완료하세요.',exchanging_token:'공식 로그인 응답을 확인하고 있습니다.',saving_credential:'이 기기에 연결을 안전하게 저장하고 있습니다.',checking_connection:'공식 서버 연결을 검사하고 있습니다.'};
 const unavailable='벤디트봇 전용 앱 연결을 준비하고 있습니다. 현재 배포에는 공급자 등록이 없어 로그인할 수 없습니다. 앱 업데이트 후 다시 확인하세요.';
 const setup:Record<AppConnectorProvider,string>={
   google:'Google Cloud에서 Desktop app OAuth 클라이언트를 등록하고 사용할 API를 켜세요. 테스트 사용자와 동의 화면 설정이 필요할 수 있습니다.',
@@ -72,8 +73,9 @@ export class AppConnectorManager {
     const definition=appConnectorDefinition(id);if(definition.provider!=='notion'&&!this.options.secrets.has(configKey(definition.provider))&&!this.registrations.has(definition.provider))fail(`${unavailable} ${definition.provider==='github'?'전용 등록이 필요합니다.':''}`);
     // Start in background; the renderer can cancel or close its dialog without retaining an OAuth URL/token.
     void this.operation(id,'authorizing',async signal=>{
-      this.errors.delete(id);const provider=definition.provider;this.phase(id,'discovering');
+      this.errors.delete(id);const provider=definition.provider;this.phase(id,provider!=='notion'&&this.options.secrets.has(configKey(provider))?'reading_registration':'discovering');
       const preset=provider==='notion'?undefined:await this.client(provider,signal);
+      this.phase(id,'discovering');
       if(provider==='github'&&preset?.flow==='device'){
         const metadata:OAuthMetadata={issuer:'https://github.com',authorizationEndpoint:'https://github.com/login/device',tokenEndpoint:'https://github.com/login/oauth/access_token'},scopes=preset.githubApp?[]:definition.scopes;
         this.phase(id,'opening_browser');
@@ -143,6 +145,7 @@ export class AppConnectorManager {
     const id=appConnectorId(input.id),operation=text(input.operation,100),args=input.args===undefined?{}:record(input.args);if(JSON.stringify(args).length>8000)fail('앱 읽기 입력 한도를 초과했습니다.');
     return this.operation(id,'verifying',async current=>{const token=await this.token(id,current);let value:unknown;
       if(token.provider==='google')value=operation==='list_read_tools'?{operations:GOOGLE_OPERATIONS[id]}:await googleRead(this.fetcher,id,operation,args,token.accessToken,current);
+      else if(id==='github'&&operation==='read_feedback_pr_verification'){value=await readFeedbackGithubProof(this.fetcher,token.accessToken,args,current);}
       else{const mcp=new ReadOnlyMcp(this.fetcher,token.provider,token.accessToken,current);value=operation==='list_read_tools'?{tools:await mcp.list()}:await mcp.call(operation,args);}
       abort(current);this.errors.delete(id);let output=JSON.stringify(value);
       // Redact both representations, including quoted/escaped credentials in a

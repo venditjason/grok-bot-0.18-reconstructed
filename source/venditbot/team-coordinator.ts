@@ -1,3 +1,4 @@
+import {validChatAttachments,type ChatAttachment} from '../shared/chat-attachments.js';
 import {resolveTeamDevelopment} from '../shared/development-routing.js';
 import {randomUUID} from 'node:crypto';
 import {safeError, validConnections, type ConnectionRoute, type ChatSession} from './local-store.js';
@@ -52,7 +53,8 @@ export class TeamCoordinator {
   constructor(readonly store: TeamStore, private readonly port: TeamPort) {}
   summaries(): TeamRunSummary[] { return this.store.listSummaries(); }
   detail(id: string): TeamRunDetail { return teamRunDetail(this.store.getRun(id)); }
-  start(teamId: string, goal: string, members: AgentProfile[], contextRunId?: string, internal?: {routineDispatchId: string}): TeamRunDetail {
+  start(teamId: string, goal: string, members: AgentProfile[], contextRunId?: string, internal?: {routineDispatchId: string}, attachments?:ChatAttachment[]): TeamRunDetail {
+    if(attachments!==undefined&&!validChatAttachments(attachments))throw Error('팀 첨부 목록을 확인하세요.');
     if (internal && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(internal.routineDispatchId)) throw new Error('루틴 실행 ID를 확인하세요.');
     if (this.stopping) throw new Error('종료 처리를 마친 뒤 팀 작업을 시작하세요.');
     const team = this.store.getTeam(teamId);
@@ -67,7 +69,7 @@ export class TeamCoordinator {
     if (contextRunId && JSON.stringify(this.store.getRun(contextRunId).development ?? null) !== JSON.stringify(development ?? null)) throw new Error('개발 프로젝트가 바뀌었습니다. 이전 프로젝트의 문맥을 넘기지 않고 새 팀 작업을 시작하세요.');
     const run: StoredTeamRun = {...(internal ? {routineDispatchId: internal.routineDispatchId} : {}), ...(development ? {development} : {}), autonomous: team.autonomous ?? false, id: randomUUID(), teamId, ...(contextRunId ? {previousRunId: contextRunId, context: context!} : {}), teamName: team.name, teamUpdatedAt: team.updatedAt, goal: goal.trim(), instructions: team.instructions, topic: team.topic, policies: team.policies, leaderAgentId: leader.id, activeMemberAgentIds: members.map(a => a.id), memberSnapshots: structuredClone(members), additions: 0, status: 'queued', rounds: 1, createdAt: now, updatedAt: now,
       steps: [{sessionId: randomUUID(), agentId: leader.id, agentName: leader.name, round: 1, kind: 'plan', status: 'pending'}],
-      messages: [{id: randomUUID(), fromAgentName: '사용자', text: goal.trim(), kind: 'user', createdAt: now}]};
+      messages: [{...(attachments?.length?{attachments:structuredClone(attachments)}:{}),id: randomUUID(), fromAgentName: '사용자', text: goal.trim(), kind: 'user', createdAt: now}]};
     const snapshots = members.flatMap(member => {const policy = this.port.policyForAgent?.(member); return policy ? [{agentId: member.id, policy}] : [];});
     if (snapshots.length) run.policySnapshots = structuredClone(snapshots);
     if (context) this.notice(run, `같은 팀의 최근 완료 작업 ${context.length}개를 인용 문맥으로 전달했습니다. 긴 내용은 명시적으로 발췌하며 이전 도구 작업을 재실행하지 않습니다.`);
@@ -100,7 +102,8 @@ export class TeamCoordinator {
     const step = run.steps.find(item => item.sessionId === sessionId); if (!step) return;
     return {goal: run.goal, userInstructions: this.visible(run, step.agentId).filter(message => message.kind === 'user' && !message.fromAgentId && message.text !== run.goal).map(message => message.text)};
   }
-  postUser(id: string, value: string, toAgentId?: string): TeamRunDetail { this.append(id, {text: value, ...(toAgentId ? {toAgentId} : {})}); return this.detail(id); }
+  postUser(id: string, value: string, toAgentId?: string, attachments?:ChatAttachment[]): TeamRunDetail { if(attachments!==undefined&&!validChatAttachments(attachments))throw Error('팀 첨부 목록을 확인하세요.');if(attachments?.length){const run=this.store.getRun(id);for(const agentId of toAgentId?[toAgentId]:run.activeMemberAgentIds){const prior=this.visible(run,agentId).filter(m=>m.kind==='user').flatMap(m=>m.attachments??[]);if(!validChatAttachments([...new Map([...prior,...attachments].map(a=>[a.id,a])).values()]))throw Error('팀의 첨부 전송 한도에 도달했습니다. 새 작업에서 이어가세요.');}}this.append(id, {text: value, ...(toAgentId ? {toAgentId} : {}),...(attachments?.length?{attachments:structuredClone(attachments)}:{})}); return this.detail(id); }
+  attachmentsFor(sessionId:string):ChatAttachment[]{const run=this.sessionRun(sessionId),step=run?.steps.find(s=>s.sessionId===sessionId);if(!run||!step)return [];const files=this.visible(run,step.agentId).filter(m=>m.kind==='user').flatMap(m=>m.attachments??[]);const unique=[...new Map(files.map(a=>[a.id,a])).values()];if(!validChatAttachments(unique))throw Error('팀의 첨부 전송 한도에 도달했습니다. 새 작업에서 이어가세요.');return structuredClone(unique);}
   schedule(): void { if (this.scheduled || this.stopping) return; this.scheduled = true; queueMicrotask(() => { this.scheduled = false; if (!this.stopping) this.pump(); }); }
   private pump(): void {
     for (const snapshot of this.store.listActiveRuns().reverse()) {
@@ -161,7 +164,7 @@ export class TeamCoordinator {
     if (run.messages.some(m => m.kind === 'system' && m.text.startsWith('현재 연결은 도구를 지원하지 않습니다.'))) return;
     this.notice(run, '현재 연결은 도구를 지원하지 않습니다. 대표는 직접 답변하며 팀원 위임·구성 변경을 실행할 수 없습니다. 이미 공유된 결과는 문맥으로 전달됩니다.'); this.commit(run);
   }
-  private append(id: string, args: {text: string; toAgentId?: string}, sender?: {agentId: string; sessionId: string}): TeamMessage {
+  private append(id: string, args: {text: string; toAgentId?: string; attachments?:ChatAttachment[]}, sender?: {agentId: string; sessionId: string}): TeamMessage {
     const run = this.store.getRun(id);
     if (!activeTeamRun(run)) throw new Error('종료된 팀 작업에는 새 메시지를 보낼 수 없습니다.');
     if (!text(args.text, 8000)) throw new Error('팀 메시지는 1~8,000자여야 합니다.');
@@ -171,7 +174,7 @@ export class TeamCoordinator {
     if (run.messages.length >= teamMessageLimit(run) - Math.max(32, futureResults + 8)) throw new Error('팀 메시지 한도에 도달했습니다. 남은 공간은 작업 결과와 운영 기록에 사용합니다.');
     const member = sender ? run.memberSnapshots.find(a => a.id === sender.agentId) : undefined;
     if (sender && (!member || !run.activeMemberAgentIds.includes(sender.agentId))) throw new Error('팀 발신자 구성이 올바르지 않습니다.');
-    const message: TeamMessage = {id: randomUUID(), fromAgentName: member?.name ?? '사용자', ...(member ? {fromAgentId: member.id} : {}), ...(sender ? {sessionId: sender.sessionId} : {}), ...(args.toAgentId ? {toAgentId: args.toAgentId} : {}), text: args.text.trim(), kind: member ? 'agent' : 'user', createdAt: new Date().toISOString()};
+    const message: TeamMessage = {...(!sender&&args.attachments?.length?{attachments:structuredClone(args.attachments)}:{}),id: randomUUID(), fromAgentName: member?.name ?? '사용자', ...(member ? {fromAgentId: member.id} : {}), ...(sender ? {sessionId: sender.sessionId} : {}), ...(args.toAgentId ? {toAgentId: args.toAgentId} : {}), text: args.text.trim(), kind: member ? 'agent' : 'user', createdAt: new Date().toISOString()};
     this.push(run, message); this.commit(run); return structuredClone(message);
   }
   private visible(run: StoredTeamRun, agentId: string): TeamMessage[] { return run.messages.filter(m => !m.toAgentId || m.toAgentId === agentId || m.fromAgentId === agentId); }

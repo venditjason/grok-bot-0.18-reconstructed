@@ -203,3 +203,9 @@ test('model catalogs invalidate after account lifecycle changes',async t=>{
   await runtime.disconnect('codex');await runtime.listModels('codex');
   assert.equal((await requests()).filter(x=>x.method==='model/list').length,3);
 });
+
+test('Codex current and completed user images use native inline image channels without granting file tools',async t=>{
+ const {runtime,requests}=await setup(t);await login(runtime);const image='data:image/png;base64,aGVsbG8=';
+ for await(const _ of runtime.runCodexTurn({messages:[{role:'user',content:[{type:'text',text:'previous image'},{type:'image',image}]},{role:'assistant',content:'prior answer'},{role:'user',content:[{type:'text',text:'current image'},{type:'image',image}]}]})){}
+ const sent=await requests();assert.equal(sent.find(r=>r.method==='turn/start').params.input[1].url,image);assert.equal(sent.find(r=>r.method==='thread/inject_items').params.items[0].content[1].image_url,image);assert.equal(sent.find(r=>r.method==='thread/start').params.sandbox,'read-only');assert.equal(sent.find(r=>r.method==='thread/start').params.config.features.shell_tool,false);
+});
