@@ -2,11 +2,15 @@
 export type AppId = 'gmail' | 'google_calendar' | 'google_drive' | 'google_docs' | 'google_sheets' | 'notion' | 'slack' | 'github';
 export type AppConnectorProvider = 'google' | 'notion' | 'slack' | 'github';
 export type AppConnectorStatus = 'setup_required' | 'disconnected' | 'authorizing' | 'connected' | 'verifying' | 'error';
+export type AppConnectorPhase = 'discovering' | 'registering' | 'opening_browser' | 'awaiting_consent' | 'exchanging_token' | 'saving_credential' | 'checking_connection';
+export type AppConnectorRegistration = 'managed' | 'dynamic' | 'custom' | 'unavailable';
+export type AppDeviceAuthorization = {userCode:string; verificationUri:string; expiresAt:string};
 export type AppConnectorTest = {ok: boolean; checkedAt: string; message: string; kind: 'api_read' | 'mcp_handshake'; toolCount?: number};
 export type AppConnectorDefinition = {id: AppId; label: string; provider: AppConnectorProvider; scopes: string[]; description: string; setupUrl: string};
 export type AppConnectorView = AppConnectorDefinition & {
   status: AppConnectorStatus; configured: boolean; hasCredential: boolean;
   setupMessage?: string; error?: string; lastTest?: AppConnectorTest; githubApp?: boolean;
+  registration?: AppConnectorRegistration; phase?:AppConnectorPhase; phaseMessage?:string; deviceAuthorization?:AppDeviceAuthorization;
 };
 export type ConfigureAppConnectorInput = {provider: AppConnectorProvider; clientId: string; clientSecret?: string; appId?: string; githubApp?: boolean};
 export type ConnectAppConnectorInput = {id: AppId; consentAccepted: true};
