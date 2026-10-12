@@ -24,6 +24,15 @@ import type { ProviderModel } from '../shared/provider-model-catalog.js';
 import { LocalUpdater } from './local-updater.js';
 import {AutomaticTeamCreator, recoverAutomaticTeamCreation} from './automatic-team.js';
 import {PolicyStore} from './policy-store.js';
+import {RoutineStore} from './routine-store.js';
+import {RoutineScheduler} from './routine-scheduler.js';
+import {RoutineHost} from './routine-host.js';
+import {RoutineTools} from './routine-tools.js';
+import {explicitRoutineMutation} from './routine-intent.js';
+import {AppConnectorManager} from './app-connectors/manager.js';
+import {AppConnectorTools} from './app-connectors/tools.js';
+import {appConnectorId, type ConfigureAppConnectorInput} from '../shared/app-connectors.js';
+import {normalizeRoutineInput, type SaveRoutineRequest} from '../shared/routines.js';
 import {AvatarJobs} from './avatar-jobs.js';
 import {varyAvatarScene, referenceAvatarImage} from './avatar-variation.js';
 import {AgentManagementTools} from './agent-management-tools.js';
@@ -100,6 +109,9 @@ let unsavedTeamRunIds: string[] = [];
 let unsavedRabbitRunIds: string[] = [];
 let approvalTail: Promise<unknown> = Promise.resolve();
 let teams: TeamCoordinator;
+let routineHost: RoutineHost;
+let routineError: string | undefined;
+const routines = new RoutineStore(paths.profileRoot, {onChange: routines => emit({type: 'routines', routines})});
 const avatarJobs = new AvatarJobs(sessions.list(), job => emit({type: 'avatar-job', job}));
 const jobHooks = new Map<string, {started(): void; settled(session: ChatSession, error?: unknown): void}>();
 const teamStore = new TeamStore(paths.profileRoot, ids => { unsavedTeamRunIds = ids; emitStorage(); });
@@ -111,6 +123,13 @@ const rabbit = new RabbitHost({store: rabbitStore, secrets, authorize: authorize
   },
 });
 
+const appConnectors = new AppConnectorManager({root: paths.profileRoot, secrets, openExternal: url => shell.openExternal(url),
+  changed: () => emit({type: 'app-connectors-changed', appConnectors: appConnectors.list()}),
+  assertMutable: ownSecretMutation => {
+    if (quitting || quitPending || updatePending) throw new Error('종료 또는 업데이트 중에는 앱 연결을 변경할 수 없습니다.');
+    if (credentialMutation) throw new Error('보안 저장소 변경이 끝난 뒤 다시 시도하세요.');
+  },
+});
 const taskQueue = new TaskQueue({maxQueued: 16,
   onChange: snapshot => { emit({type: 'queue', ...snapshot}); teams?.schedule(); },
   onError: (sessionId, error) => {
@@ -135,7 +154,7 @@ teams = new TeamCoordinator(teamStore, {
     });
     if (prepared.length) sessions.createPrepared(prepared);
   },
-  enqueue: enqueueSession, cancelSession, getSession: readSession, queueState: () => taskQueue.state(), changed: run => emit({type: 'team-run', run}),
+  enqueue: enqueueSession, cancelSession, getSession: readSession, queueState: () => taskQueue.state(), changed: run => {emit({type: 'team-run', run}); routineHost?.teamChanged(run);},
   listAgents: () => agents.list(), listModels: listTeamModels, resolveDelegation, cloneAgent: (template, changes) => {
     const {id: _id, createdAt: _created, updatedAt: _updated, avatarId: _avatar, ...configuration} = template;
     return agents.save({...configuration, ...changes, avatarId: createDefaultAvatar()});
@@ -144,6 +163,27 @@ teams = new TeamCoordinator(teamStore, {
   policyForAgent: member => member.automation ? policies.get(member.automation.policyId) : undefined,
   teamChanged: () => { emit({type: 'teams', teams: teamStore.listTeams(), agents: agents.list()}); },
 });
+routineHost = new RoutineHost({sessions, agents, teams: teamStore, coordinator: teams, queue: () => taskQueue.state(), enqueue: enqueueSession,
+  unavailable: () => quitting || quitPending || updatePending || credentialMutation || testing || appConnectors.isBusy(),
+});
+const routineScheduler = new RoutineScheduler(routines, routineHost, {onError: reportRoutineError});
+function reportRoutineError(error: unknown): void {routineError = safeError(error); emit({type: 'routine-error', error: routineError});}
+function startRoutines(): void {if (!quitting && !quitPending && !updatePending) void routineScheduler.start().catch(reportRoutineError);}
+function saveRoutine(request: SaveRoutineRequest) {
+  const input = normalizeRoutineInput(request.routine);
+  if (!routineHost.validateTarget(input.target)) throw new Error('루틴의 에이전트 또는 팀을 선택하세요.');
+  return routines.save({...request, routine: input});
+}
+function setRoutineEnabled(id: string, enabled: boolean, revision: number) {
+  if (enabled) {
+    const current = routines.get(id);
+    if (!routineHost.validateTarget(current.target)) throw new Error('루틴의 실행 대상이 없습니다.');
+    for (const old of routines.reservations().filter(r => r.routineId === id && r.status === 'unknown')) {
+      if (routineHost.isTargetBusy(old.target)) throw new Error('이전 실행 대상의 진행 중인 작업을 확인한 뒤 다시 활성화하세요.');
+    }
+  }
+  return routines.setEnabled(id, enabled, revision);
+}
 const automaticTeams = new AutomaticTeamCreator(paths.profileRoot, agents, policies, teamStore, {
   async catalogs(input) {
     assertIdle(); const revision = configurationRevision();
@@ -211,7 +251,7 @@ function developmentConfigurationRevision(binding: DevelopmentBinding | undefine
 function assertDevelopmentConfigurationCurrent(binding: DevelopmentBinding | undefined, revision: string | undefined): void {
   if (developmentConfigurationRevision(binding) !== revision) throw new Error('모델 확인 중 개발 대상 Rabbit 연결이 변경되었습니다. 최신 연결을 확인한 뒤 다시 저장하세요.');
 }
-function assertIdle(): void { if (activeRun || taskQueue.state().running.length || taskQueue.state().queued.length || teamStore.activeRunCount() || avatarJobs.active().length || rabbit.isBusy() || testing) throw new Error('진행 중이거나 대기 중인 작업을 마치거나 중단한 뒤 다시 시도하세요.'); }
+function assertIdle(): void { if (activeRun || taskQueue.state().running.length || taskQueue.state().queued.length || teamStore.activeRunCount() || avatarJobs.active().length || rabbit.isBusy() || appConnectors.isBusy() || testing) throw new Error('진행 중이거나 대기 중인 작업을 마치거나 중단한 뒤 다시 시도하세요.'); }
 function configurationRevision(): string { return JSON.stringify(settings.getApiProviderProfiles()); }
 function assertConfigurationCurrent(revision: string, previousAgent?: AgentProfile, ownCredentialMutation = false): void {
   if (quitPending || quitting || updatePending) throw new Error('종료 또는 업데이트 준비 중에는 설정을 저장할 수 없습니다.');
@@ -238,7 +278,7 @@ function cancelSession(id: string): boolean {
 }
 function settleJob(id: string, error?: unknown): void { const hooks = jobHooks.get(id); jobHooks.delete(id); hooks?.settled(readSession(id), error); }
 function state() {
-  return { version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
+  return { appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
 }
 function enqueueSession(sessionId: string, text: string, hooks?: {started(): void; settled(session: ChatSession, error?: unknown): void}, operation = run): {started: boolean; queued: boolean; sessionId: string} {
   const session = readSession(sessionId), queue = taskQueue.state();
@@ -423,12 +463,12 @@ function requestApproval(request: WriteApproval | ActionApprovalRequest, signal:
     emit({type: 'tool-approval', approvalId, ...(sessionId ? {sessionId} : {}), ...request});
   });
 }
-function authorizeAction(request: ActionApprovalRequest, signal: AbortSignal, sessionId?: string): Promise<boolean> {
+function authorizeAction(request: ActionApprovalRequest, signal: AbortSignal, sessionId?: string, forceApproval = false): Promise<boolean> {
   const result = approvalTail.then(async () => {
     if (signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
     const before = actionRules.get(), decision = evaluateActionRules(before, request);
     if (decision.mode === 'deny') throw new Error(`규칙에 따라 작업을 차단했습니다. ${decision.reason}`);
-    if (decision.mode === 'allow') return true;
+    if (decision.mode === 'allow' && !forceApproval) return true;
     const approved = await requestApproval({...request, reason: [request.reason, decision.reason].filter(Boolean).join(' · ')}, signal, sessionId);
     if (!approved || signal.aborted) return false;
     const current = actionRules.get();
@@ -480,6 +520,33 @@ async function run(sessionId: string, text: string, controller: AbortController)
     getRecord: id => rabbitStore.getRun(id), refresh: record => rabbit.refresh(record.id, controller.signal, true),
     authorizeRead: tool => authorize({path: '.', operation: 'read', tool, category: 'routine'}),
   }, {sessionId, agentId: session.agentId, ...(session.teamRunId ? {teamRunId: session.teamRunId} : {})}, controller.signal) : undefined;
+  const routineRun = session.teamRunId ? teams.sessionRun(sessionId) : undefined;
+  const routineTools = session.agentId && session.purpose !== 'avatar' ? new RoutineTools({
+    list: () => {agents.get(session.agentId!); return routines.list();},
+    save: input => {agents.get(session.agentId!); return saveRoutine(input);},
+    setEnabled: (id, enabled, revision) => {agents.get(session.agentId!); return setRoutineEnabled(id, enabled, revision);},
+    remove: (id, revision) => {agents.get(session.agentId!); return routines.remove(id, revision);},
+    isCurrentTeamLeader: (agentId, teamId) => {
+      const run = teams.sessionRun(sessionId), team = teamStore.listTeams().find(t => t.id === teamId);
+      return !!run && activeTeamRun(run) && run.teamId === teamId && run.leaderAgentId === agentId && team?.leaderAgentId === agentId && run.activeMemberAgentIds.includes(agentId);
+    },
+    authorizeMutation: (name, args) => {
+      const humanRequest = projectTaskText();
+      const explicitRoutine = explicitRoutineMutation(name, humanRequest, args.enabled);
+      const request = {path: '.', operation: 'manage' as const, tool: name, category: 'routine' as const,
+        reason: '현재 에이전트 또는 팀의 향후 반복 일정을 변경합니다. 현재 실행은 유지됩니다.', preview: JSON.stringify(args).slice(0, 4000)};
+      // Only the actual human instruction may authorize automatic scheduling.
+      // Model-supplied userRequest is context for review, never authority.
+      return authorizeAction(request, controller.signal, sessionId, !explicitRoutine);
+    },
+  }, {sessionId, agentId: session.agentId, ...(routineRun ? {teamId: routineRun.teamId} : {})}, controller.signal) : undefined;
+  const connectorTools = session.agentId && session.purpose !== 'avatar' ? new AppConnectorTools({
+    list: () => appConnectors.list(), grantRevision: id => appConnectors.grantRevision(id), read: (input, signal) => appConnectors.read(input, signal),
+    authorizeRead: (id, operation, args) => authorize({path: '.', operation: 'read', tool: 'read_connected_app',
+      category: id && operation !== 'list_read_tools' ? 'sensitive_disclosure' : 'routine',
+      reason: id && operation !== 'list_read_tools' ? `${id}에서 조회한 자료가 현재 AI 연결로 전달됩니다.` : '연결된 앱의 읽기 도구를 확인합니다.',
+      preview: JSON.stringify({app: id, operation, args}).slice(0, 4000)}),
+  }, controller.signal) : undefined;
   const agentTools = currentAgent ? new AgentManagementTools({agentId: currentAgent.id, expectedUpdatedAt: currentAgent.updatedAt, renameAgent: renameSavedAgent, signal: controller.signal}) : undefined;
   const execute = async (definition: {name?: unknown}, args: unknown, callId: string): Promise<unknown> => {
     if (finalized || controller.signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
@@ -487,7 +554,9 @@ async function run(sessionId: string, text: string, controller: AbortController)
     const isTeamTool = teamTools?.definitions.some(tool => tool.name === definition.name);
     const isAgentTool = agentTools?.definitions.some(tool => tool.name === definition.name);
     const isProjectTool = projectTools?.definitions.some(tool => tool.name === definition.name);
-    if (!isTeamTool && !isAgentTool && !isProjectTool && !executor) throw new Error('작업 폴더를 선택한 대화에서만 파일 도구를 사용할 수 있습니다.');
+    const isRoutineTool = routineTools?.definitions.some(tool => tool.name === definition.name);
+    const isConnectorTool = connectorTools?.definitions.some(tool => tool.name === definition.name);
+    if (!isTeamTool && !isAgentTool && !isProjectTool && !isRoutineTool && !isConnectorTool && !executor) throw new Error('작업 폴더를 선택한 대화에서만 파일 도구를 사용할 수 있습니다.');
     const raw = args && typeof args === 'object' ? args as Record<string, unknown> : {};
     answer.tools ??= []; const prior = answer.tools.find(t => t.callId === callId);
     const record: ToolRecord = prior ?? {callId, name: definition.name, ...(typeof raw.path === 'string' ? {path: raw.path} : {}), status: 'running', input: structuredClone(raw)};
@@ -496,7 +565,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
     try {
       if ((isTeamTool || isAgentTool) && !await authorize({path: '.', operation: 'manage', tool: definition.name, category: 'routine', reason: '현재 에이전트 또는 팀 범위의 작업 도구입니다.'})) throw new Error('사용자가 이 작업을 승인하지 않았습니다.');
       if (finalized || controller.signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
-      const result = isTeamTool ? await teamTools!.execute(definition.name, args, callId) : isAgentTool ? await agentTools!.execute(definition.name, args, callId) : isProjectTool ? await projectTools!.execute(definition.name, args, callId) : await executor!.execute(definition.name, args, callId);
+      const result = isConnectorTool ? await connectorTools!.execute(definition.name, args, callId) : isRoutineTool ? await routineTools!.execute(definition.name, args, callId) : isTeamTool ? await teamTools!.execute(definition.name, args, callId) : isAgentTool ? await agentTools!.execute(definition.name, args, callId) : isProjectTool ? await projectTools!.execute(definition.name, args, callId) : await executor!.execute(definition.name, args, callId);
       record.output = structuredClone(result);
       record.status = 'completed'; record.summary = definition.name === 'write_file' ? ((result as {written?: boolean}).written ? '파일을 저장했습니다.' : '파일 수정을 거절했습니다.') : '완료';
       return result;
@@ -524,7 +593,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
     }
     if (JSON.stringify(history).length > 500_000) throw new Error('대화가 너무 길어졌습니다. 새 대화에서 이어가세요. 현재 이력은 저장되어 있습니다.');
     if (session.workspacePath) executor = new WorkspaceExecutor(session.workspacePath, approve, controller.signal, authorizeWorkspace);
-    const tools = [...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? [])];
+    const tools = [...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
     const routes = connectionRoutes(session);
     for (const [index, route] of routes.entries()) {
       if (controller.signal.aborted) throw new DOMException('중단했습니다.', 'AbortError');
@@ -635,7 +704,7 @@ async function cancelUpdateHandoff(): Promise<void> {
   const prepared = updateHandoff; quitting = false; cancellingUpdate = true;
   try {
     await prepared.cancel(); updateHandoff = undefined; updatePending = false;
-    teams.resumeAfterQuit(); startUpdateChecks(); window?.show(); window?.focus();
+    teams.resumeAfterQuit(); startUpdateChecks(); startRoutines(); window?.show(); window?.focus();
   } catch (error) {
     // Keep the parent alive and locked until the replacement helper is stopped.
     emit({type: 'update', update: {...updater.state(), phase: 'error', error: `업데이트 도우미 중단을 확인하지 못했습니다. 앱을 열어 두세요. ${safeError(error)}`}});
@@ -645,7 +714,7 @@ async function installUpdate(): Promise<{restarting: true}> {
   if (updatePending || quitPending || quitting) throw new Error('이미 업데이트 또는 종료를 준비하고 있습니다.');
   if (updater.state().phase === 'development') throw new Error('개발 앱에서는 운영 앱 업데이트를 설치하지 않습니다.');
   if (updater.state().phase !== 'available') throw new Error('설치할 업데이트를 먼저 확인하세요.');
-  assertUpdateIdle(); updatePending = true;
+  assertUpdateIdle(); updatePending = true; routineScheduler.stop();
   let prepared: Awaited<ReturnType<LocalUpdater['prepare']>> | undefined;
   try {
     const statuses = await authStatus();
@@ -663,7 +732,7 @@ async function installUpdate(): Promise<{restarting: true}> {
       updateHandoff = prepared; quitting = false;
       throw new Error(`업데이트 도우미 중단을 확인하지 못했습니다. 앱을 열어 두세요. ${safeError(cancelError)}`);
     }
-    updateHandoff = undefined; quitting = false; updatePending = false; teams.resumeAfterQuit(); startUpdateChecks(); window?.show(); window?.focus(); throw error;
+    updateHandoff = undefined; quitting = false; updatePending = false; teams.resumeAfterQuit(); startUpdateChecks(); startRoutines(); window?.show(); window?.focus(); throw error;
   }
 }
 async function request(method: string, raw: unknown): Promise<unknown> {
@@ -674,6 +743,21 @@ async function request(method: string, raw: unknown): Promise<unknown> {
   const args = raw == null ? {} : object(raw);
   switch (method) {
     case 'state': return state();
+    case 'appConnectorsList': return appConnectors.list();
+    case 'appConnectorsConfigure': return appConnectors.configure(args as unknown as ConfigureAppConnectorInput);
+    case 'appConnectorsConnect': {
+      if (args.consentAccepted !== true) throw new Error('앱 접근 권한을 확인한 뒤 연결에 동의하세요.');
+      return appConnectors.connect({id: appConnectorId(args.id), consentAccepted: true});
+    }
+    case 'appConnectorsCancel': return appConnectors.cancel({id: appConnectorId(args.id)});
+    case 'appConnectorsDisconnect': return appConnectors.disconnect({id: appConnectorId(args.id)});
+    case 'appConnectorsTest': return appConnectors.test({id: appConnectorId(args.id), ...(args.resourceId === undefined ? {} : {resourceId: string(args.resourceId, 200)})});
+    case 'saveRoutine': return saveRoutine({routine: normalizeRoutineInput(args.routine), ...(args.expectedRevision === undefined ? {} : {expectedRevision: args.expectedRevision as number}), ...(args.requestId === undefined ? {} : {requestId: string(args.requestId, 100)})});
+    case 'setRoutineEnabled': {
+      if (typeof args.enabled !== 'boolean') throw new Error('루틴의 활성 상태를 확인하세요.');
+      return setRoutineEnabled(string(args.id, 100), args.enabled, args.expectedRevision as number);
+    }
+    case 'deleteRoutine': return routines.remove(string(args.id, 100), args.expectedRevision as number);
     case 'checkUpdate': return updater.check();
     case 'installUpdate': return installUpdate();
     case 'authStatus': return authStatus();
@@ -948,7 +1032,7 @@ function exportPrivate(path: string, content: string): void {
   app.on('second-instance', () => { if (window?.isMinimized()) window.restore(); window?.focus(); });
   app.on('window-all-closed', () => app.quit());
   const prepareQuit = async (): Promise<void> => {
-    quitPending = true; boundedQuitReady = false;
+    quitPending = true; boundedQuitReady = false; routineScheduler.stop();
     try {
       teams.stopForQuit();
       for (const job of avatarJobs.active()) cancelAvatarRequest(job.requestId);
@@ -958,6 +1042,8 @@ function exportPrivate(path: string, content: string): void {
       for (const id of [...snapshot.queued, ...snapshot.running]) {
         try { cancelSession(id); } catch (error) { console.error(safeError(error)); }
       }
+      const appsDrained = await appConnectors.abortAndWait(4000);
+      if (!appsDrained) throw new Error('앱 연결 정리가 아직 끝나지 않았습니다. 연결 취소를 확인한 뒤 다시 종료하세요.');
       const rabbitDrained = await rabbit.abortAndWait(4000);
       const drained = await taskQueue.waitForIdle(4000);
       if (!rabbitDrained) throw new Error('프로젝트 API 요청 정리가 아직 끝나지 않았습니다. 다시 종료하세요.');
@@ -981,7 +1067,7 @@ function exportPrivate(path: string, content: string): void {
       shutdownProviderAuthRuntime(); app.quit();
     } catch (error) { quitting = false; console.error(safeError(error)); }
     finally {
-      if (!quitting) { boundedQuitReady = false; quitPending = false; teams.resumeAfterQuit(); window?.show(); window?.focus(); }
+      if (!quitting) { boundedQuitReady = false; quitPending = false; teams.resumeAfterQuit(); startRoutines(); window?.show(); window?.focus(); }
     }
   };
   app.on('before-quit', event => {
@@ -1008,7 +1094,7 @@ function exportPrivate(path: string, content: string): void {
     window.webContents.on('will-navigate', event => event.preventDefault());
     window.webContents.on('will-prevent-unload', () => {
       if (updatePending) void cancelUpdateHandoff();
-      else if (quitting) { boundedQuitReady = false; quitting = false; quitPending = false; teams.resumeAfterQuit(); startUpdateChecks(); window?.show(); window?.focus(); }
+      else if (quitting) { boundedQuitReady = false; quitting = false; quitPending = false; teams.resumeAfterQuit(); startUpdateChecks(); startRoutines(); window?.show(); window?.focus(); }
     });
     window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     ipcMain.handle('venditbot:request', async (event, payload: unknown) => {
@@ -1024,7 +1110,7 @@ function exportPrivate(path: string, content: string): void {
       } catch (error) { return { ok: false, error: safeError(error) }; }
     });
     await window.loadFile(rendererPath); await updater.acknowledgeStartup(); releaseStartup(); window.show();
-    startUpdateChecks();
+    startUpdateChecks(); startRoutines();
   }).catch(async error => {
     startupFailure = safeError(error); releaseStartup(); console.error(startupFailure);
     try { await shutdownProviderAuthRuntimeForUpdate(); } catch { shutdownProviderAuthRuntime(); }

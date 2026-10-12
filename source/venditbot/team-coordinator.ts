@@ -52,7 +52,8 @@ export class TeamCoordinator {
   constructor(readonly store: TeamStore, private readonly port: TeamPort) {}
   summaries(): TeamRunSummary[] { return this.store.listSummaries(); }
   detail(id: string): TeamRunDetail { return teamRunDetail(this.store.getRun(id)); }
-  start(teamId: string, goal: string, members: AgentProfile[], contextRunId?: string): TeamRunDetail {
+  start(teamId: string, goal: string, members: AgentProfile[], contextRunId?: string, internal?: {routineDispatchId: string}): TeamRunDetail {
+    if (internal && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(internal.routineDispatchId)) throw new Error('루틴 실행 ID를 확인하세요.');
     if (this.stopping) throw new Error('종료 처리를 마친 뒤 팀 작업을 시작하세요.');
     const team = this.store.getTeam(teamId);
     if (!text(goal, 8000)) throw new Error('팀 목표를 1~8,000자로 입력하세요.');
@@ -64,7 +65,7 @@ export class TeamCoordinator {
     const now = new Date().toISOString(), leader = members.find(a => a.id === team.leaderAgentId)!;
     const development = resolveTeamDevelopment(team.development, leader.development);
     if (contextRunId && JSON.stringify(this.store.getRun(contextRunId).development ?? null) !== JSON.stringify(development ?? null)) throw new Error('개발 프로젝트가 바뀌었습니다. 이전 프로젝트의 문맥을 넘기지 않고 새 팀 작업을 시작하세요.');
-    const run: StoredTeamRun = {...(development ? {development} : {}), autonomous: team.autonomous ?? false, id: randomUUID(), teamId, ...(contextRunId ? {previousRunId: contextRunId, context: context!} : {}), teamName: team.name, teamUpdatedAt: team.updatedAt, goal: goal.trim(), instructions: team.instructions, topic: team.topic, policies: team.policies, leaderAgentId: leader.id, activeMemberAgentIds: members.map(a => a.id), memberSnapshots: structuredClone(members), additions: 0, status: 'queued', rounds: 1, createdAt: now, updatedAt: now,
+    const run: StoredTeamRun = {...(internal ? {routineDispatchId: internal.routineDispatchId} : {}), ...(development ? {development} : {}), autonomous: team.autonomous ?? false, id: randomUUID(), teamId, ...(contextRunId ? {previousRunId: contextRunId, context: context!} : {}), teamName: team.name, teamUpdatedAt: team.updatedAt, goal: goal.trim(), instructions: team.instructions, topic: team.topic, policies: team.policies, leaderAgentId: leader.id, activeMemberAgentIds: members.map(a => a.id), memberSnapshots: structuredClone(members), additions: 0, status: 'queued', rounds: 1, createdAt: now, updatedAt: now,
       steps: [{sessionId: randomUUID(), agentId: leader.id, agentName: leader.name, round: 1, kind: 'plan', status: 'pending'}],
       messages: [{id: randomUUID(), fromAgentName: '사용자', text: goal.trim(), kind: 'user', createdAt: now}]};
     const snapshots = members.flatMap(member => {const policy = this.port.policyForAgent?.(member); return policy ? [{agentId: member.id, policy}] : [];});

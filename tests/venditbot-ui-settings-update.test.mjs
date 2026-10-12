@@ -150,3 +150,45 @@ test('pending install immediately shows preparation, unrelated busy work does no
   f.render(show({ update: { phase: 'error', currentVersion: '0.3.3', error: '설치 준비가 거절되었습니다.' } }));
   assert.equal(f.host.querySelector('progress'), null); assert.match(f.host.textContent, /설치 준비가 거절되었습니다/); assert.equal(timer.timers.size, 0);
 });
+
+test('sidebar shows the installed version and exposes updates only after discovery', t => {
+  const f = fixture(t, h(App, { initialState: { ...snapshot, version: '0.3.9' } }));
+  const brand = f.host.querySelector('.brand');
+  assert.equal(brand.querySelector('.brand-version').textContent, '(0.3.9)');
+  assert.equal(brand.querySelector('.brand-update'), null);
+  flushSync(() => eventHandler({ type: 'update', update: { phase: 'available', currentVersion: '0.3.9', version: '0.4.0' } }));
+  assert.equal(brand.querySelector('.brand-update').getAttribute('aria-label'), '0.4.0 업데이트 설치');
+  assert.equal(brand.querySelector('.brand-version').textContent, '(0.3.9)', 'available version never replaces installed version');
+  for (const phase of ['idle', 'error', 'development', 'installing']) {
+    flushSync(() => eventHandler({ type: 'update', update: { phase, currentVersion: '0.3.9', version: '0.4.0' } }));
+    assert.equal(brand.querySelector('.brand-update'), null, phase);
+  }
+});
+
+test('sidebar update opens progress immediately and keeps active work protected', async t => {
+  const available = { ...snapshot, version: '0.3.9', update: { phase: 'available', currentVersion: '0.3.9', version: '0.4.0' } };
+  let installs = 0;
+  t.mock.method(browser.venditbot, 'invoke', async method => {
+    if (method === 'installUpdate') { installs++; return new Promise(() => {}); }
+    if (method === 'authStatus') return {};
+    return available;
+  });
+  const f = fixture(t, h(App, { initialState: available }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  click(f.host.querySelector('.brand-update'));
+  assert.equal(installs, 1);
+  const panel = f.host.querySelector('[aria-label="업데이트 설정"]');
+  assert.equal(panel.hidden, false);
+  assert.match(panel.textContent, /설치 준비 중/);
+  f.unmount();
+  const working = { ...available, queue: { running: [{ sessionId: 'busy' }], queued: [] } };
+  t.mock.method(browser.venditbot, 'invoke', async method => method === 'authStatus' ? {} : working);
+  const busy = fixture(t, h(App, { initialState: working }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  click(busy.host.querySelector('.brand-update'));
+  assert.equal(installs, 1, 'active work does not start an install');
+  const blocked = busy.host.querySelector('[aria-label="업데이트 설정"]');
+  assert.equal(blocked.hidden, false);
+  assert.match(blocked.textContent, /작업 완료 후 업데이트/);
+  assert.equal(button(blocked, '0.4.0 업데이트').disabled, true);
+});

@@ -126,7 +126,8 @@ test('agent overview, detail and task snapshots display each connection in prior
   const task = { id: 'task', title: 'Fallback task', ...connections[0], connections, createdAt: '2026-01-01', updatedAt: '2026-01-01', messages: [{ id: 'answer', role: 'assistant', status: 'completed', text: '완료한 답변', attempts: [{ ...connections[0], status: 'failed', error: 'quota fixture error' }, { ...connections[1], status: 'completed' }] }] };
   const html = render({ initialView: 'chat', initialSessionId: 'task', initialState: { ...initialState, sessions: [task] } });
   assert.match(html, /aria-label="작업의 연결 우선순위"/);
-  assert.match(html, /aria-label="실제 연결 시도"/);
-  assert.match(html, /Codex · first-model.*실패.*quota fixture error.*Claude · second-model · high.*응답 완료/);
+  assert.match(html, /연결 2회 · 응답 완료 · 실패 1/);
+  assert.match(html, /작업 정책/);
+  assert.doesNotMatch(html, /quota fixture error/); // Detail is retained in the explicit connection dialog.
   assert.match(html, /완료한 답변/);
 });

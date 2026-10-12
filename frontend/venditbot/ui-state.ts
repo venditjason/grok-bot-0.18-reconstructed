@@ -1,3 +1,4 @@
+import type {Routine} from '../../source/shared/routines';
 import type {DevelopmentBinding} from '../../source/shared/development-routing';
 import type { RabbitProfile, RabbitRunRecord } from './rabbit-ui-state';
 import type { ActionRules } from '../../source/shared/action-rules';
@@ -26,9 +27,11 @@ export type UpdateProgress = {
   percent?: number; completedBytes?: number; totalBytes?: number; startedAt: string; updatedAt: string;
 };
 export type UpdateStatus = { phase: 'development' | 'idle' | 'available' | 'installing' | 'error'; currentVersion: string; version?: string; error?: string; progress?: UpdateProgress };
-export type State = { rabbitConnections?: RabbitProfile[]; rabbitRuns?: RabbitRunRecord[]; actionRules?: ActionRules; policies?: AgentPolicy[]; avatarJobs?: AvatarJob[]; update?: UpdateStatus; profiles: Profile[]; agents: AgentProfile[]; teams?: TeamProfile[]; teamRuns?: TeamRunSummary[]; sessions: Session[]; queue: { running: string[]; queued: string[] }; activeRun: { sessionId: string } | null; unsavedSessionIds?: string[]; unsavedTeamRunIds?: string[]; unsavedRabbitRunIds?: string[]; version: string };
+export type State = { routines?: Routine[]; routineError?: string; rabbitConnections?: RabbitProfile[]; rabbitRuns?: RabbitRunRecord[]; actionRules?: ActionRules; policies?: AgentPolicy[]; avatarJobs?: AvatarJob[]; update?: UpdateStatus; profiles: Profile[]; agents: AgentProfile[]; teams?: TeamProfile[]; teamRuns?: TeamRunSummary[]; sessions: Session[]; queue: { running: string[]; queued: string[] }; activeRun: { sessionId: string } | null; unsavedSessionIds?: string[]; unsavedTeamRunIds?: string[]; unsavedRabbitRunIds?: string[]; version: string };
 export type Auth = { installed?: boolean; phase: string; authenticated: boolean; inferenceVerified: boolean; credentialStorage?: 'session' | 'keyring' | 'provider-managed'; account?: { email?: string | null; plan?: string | null } | null; error?: string | null };
 export type UiEvent =
+  | { type: 'routines'; routines: Routine[] }
+  | { type: 'routine-error'; error: string }
   | { type: 'rabbit'; rabbitConnections: RabbitProfile[]; rabbitRuns: RabbitRunRecord[] }
   | { type: 'action-rules'; rules: ActionRules }
   | { type: 'policies'; policies: AgentPolicy[] }
@@ -78,6 +81,8 @@ export function duplicateConnectionIndex(connections: AgentConnection[]): number
 
 /** Only the matching live message may receive streamed updates. */
 export function reduceStateEvent(state: State, event: UiEvent | QueueEvent): State {
+  if (event.type === 'routine-error') return { ...state, routineError: event.error };
+  if (event.type === 'routines') return { ...state, routines: event.routines };
   if (event.type === 'rabbit') return { ...state, rabbitConnections: event.rabbitConnections, rabbitRuns: event.rabbitRuns };
   if (event.type === 'action-rules') return { ...state, actionRules: event.rules };
   if (event.type === 'policies') return { ...state, policies: event.policies };
