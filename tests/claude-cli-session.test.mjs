@@ -87,3 +87,19 @@ test('Claude handoff rejects oversized, unserializable or invalid context before
  }
  await assert.rejects(()=>recordedInput(runtime),{code:'ENOENT'});
 });
+
+
+test('Claude approved search enables only WebSearch plus owned MCP, and reports actual tool result failure',async t=>{
+ const runtime=await setup(t);const events=[];
+ for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'web-fail'}],nativeWebSearch:true,mcpServer:{url:'http://127.0.0.1:12345/mcp',token:'x'.repeat(48)}}))events.push(event);
+ const {args}=await recordedInput(runtime);
+ assert.equal(args[args.indexOf('--tools')+1],'WebSearch');assert.equal(args[args.indexOf('--allowedTools')+1],'mcp__venditbot__*,WebSearch');
+ assert.equal(args[args.indexOf('--permission-mode')+1],'default');assert.equal(args.includes('--dangerously-skip-permissions'),false);
+ assert.deepEqual(events.filter(x=>x.type==='native-web-search').map(x=>x.status),['running','failed']);
+});
+test('Claude refuses unapproved native search events and cancels an active search',async t=>{
+ const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'web-fail'}]})){}},/승인되지/);
+ const controller=new AbortController(),events=[];
+ await assert.rejects(async()=>{for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'web-hang'}],nativeWebSearch:true,signal:controller.signal})){events.push(event);if(event.type==='native-web-search')controller.abort();}},{name:'AbortError'});
+ assert.equal(events.some(x=>x.type==='done'||x.status==='completed'),false);
+});

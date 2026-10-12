@@ -7,16 +7,17 @@ import type {RabbitHost} from './rabbit-host.js';
 import type {RabbitStore,RabbitRunRecord} from './rabbit-store.js';
 import {FeedbackStore,readFeedbackPrivate,validateFeedbackBinding,type FeedbackRecord} from './feedback-store.js';
 import {FeedbackHost,type FeedbackProgress} from './feedback-host.js';
-import {FEEDBACK_REPOSITORY,type FeedbackBinding,type FeedbackAgent,type FeedbackMergeProof,type FeedbackSnapshot} from '../shared/feedback.js';
+import {FEEDBACK_REPOSITORY,type FeedbackBinding,type FeedbackAgent,type FeedbackMergeProof,type FeedbackDraftProof,type FeedbackSnapshot} from '../shared/feedback.js';
 const instructions='[venditbot-system-report-v1]\n당신은 고정 리포트 에이전트입니다. 사용자의 버그와 기능 요청을 정리하고 저장된 실행 상태를 정확히 설명하세요. 대상 저장소는 venditjason/grok-bot-0.18-reconstructed입니다. 리포트 저장, 원격 접수, 모델 답변은 개발 완료나 병합이 아닙니다. 테스트·실제 PR 병합 증빙을 확인하기 전에는 완료라고 말하지 마세요. 원격 접수 결과가 불확실하면 로컬 중복 실행을 금지합니다. 자격 증명이나 Keychain 값을 요구·출력하지 마세요.';
 export interface FeedbackDevelopmentExecutor {
  /** Must prove scoped native code/test/Git/PR capability; normal WorkspaceTools are insufficient. */
  available(job:FeedbackRecord):boolean;
  dispatch(job:FeedbackRecord):Promise<FeedbackAgent>;
  observe(job:FeedbackRecord):Promise<FeedbackProgress>;
+ verifyDraft?(job:FeedbackRecord):Promise<FeedbackDraftProof|undefined>;
  verifyMerge(job:FeedbackRecord):Promise<FeedbackMergeProof|undefined>;
 }
-export type FeedbackMainOptions={root:string;agents:AgentStore;sessions:LocalSessionStore;rabbit:RabbitHost;rabbitStore:RabbitStore;defaultRoute():ConnectionRoute|undefined;assertMutable():void;changed(snapshot:FeedbackSnapshot):void;developmentExecutor?:FeedbackDevelopmentExecutor;isSessionBusy?:(id:string)=>boolean;verifyRabbitMerge?:(job:FeedbackRecord,run:RabbitRunRecord)=>Promise<FeedbackMergeProof|undefined>;inspectWorkspace?:(binding:FeedbackBinding)=>void};
+export type FeedbackMainOptions={root:string;agents:AgentStore;sessions:LocalSessionStore;rabbit:RabbitHost;rabbitStore:RabbitStore;defaultRoute():ConnectionRoute|undefined;assertMutable():void;changed(snapshot:FeedbackSnapshot):void;developmentExecutor?:FeedbackDevelopmentExecutor;isSessionBusy?:(id:string)=>boolean;verifyRabbitDraft?:(job:FeedbackRecord,run:RabbitRunRecord)=>Promise<FeedbackDraftProof|undefined>;verifyRabbitMerge?:(job:FeedbackRecord,run:RabbitRunRecord)=>Promise<FeedbackMergeProof|undefined>;inspectWorkspace?:(binding:FeedbackBinding)=>void};
 type Configuration={version:1;binding?:FeedbackBinding;agentId?:string;sessionId?:string};
 export function inspectFeedbackWorkspace(binding:FeedbackBinding):void {
  validateFeedbackBinding(binding);
@@ -60,6 +61,7 @@ export class FeedbackMainAdapter {
    localAvailable:job=>!!options.developmentExecutor?.available(job),
    dispatchLocal:async job=>{this.checkedBinding(job);if(!options.developmentExecutor)throw new Error('개발 실행기가 없습니다.');return options.developmentExecutor.dispatch(job);},
    observeLocal:job=>options.developmentExecutor?.observe(job)??Promise.resolve({state:'unknown',message:'기존 로컬 실행을 확인할 개발 실행기가 없습니다.'}),
+   verifyDraft:async job=>{if(job.route==='rabbit'){const run=options.rabbitStore.getRun(job.id);this.checkRemoteRecord(run,job);return options.verifyRabbitDraft?.(job,run);}return options.developmentExecutor?.verifyDraft?.(job);},
    verifyMerge:async job=>{if(job.route==='rabbit'){const run=options.rabbitStore.getRun(job.id);this.checkRemoteRecord(run,job);return options.verifyRabbitMerge?.(job,run);}return options.developmentExecutor?.verifyMerge(job);},
    assertMutable:()=>options.assertMutable(),
    changed:snapshot=>{this.syncConversation(snapshot);options.changed(snapshot);}
@@ -110,7 +112,7 @@ export class FeedbackMainAdapter {
    return {ready:true,canFallback:false};
   }catch{return {ready:false,canFallback:false,message:'Rabbit 저장소 조회 또는 승인을 확인하지 못했습니다. 아직 작업을 제출하지 않았습니다.'};}
  }
- private checkRemoteRecord(run:RabbitRunRecord,job:FeedbackRecord){const b=job.binding;if(!b||run.id!==job.id||run.connectionId!==b.rabbitConnectionId||run.request.repository_id!==b.rabbitRepositoryId||run.request.base_ref!==b.baseBranch||![this.objective(job),this.legacyObjective(job)].includes(run.request.objective))throw new Error('리포트와 Rabbit 기록의 저장소 또는 요청이 다릅니다.');}
+ private checkRemoteRecord(run:RabbitRunRecord,job:FeedbackRecord){const b=job.binding;if(!b||run.id!==job.id||(job.remoteRunId!==undefined&&job.remoteRunId!==run.receipt?.run_id)||run.connectionId!==b.rabbitConnectionId||run.request.repository_id!==b.rabbitRepositoryId||run.request.base_ref!==b.baseBranch||![this.objective(job),this.legacyObjective(job)].includes(run.request.objective))throw new Error('리포트와 Rabbit 기록의 저장소 또는 요청이 다릅니다.');}
  private remoteReceipt(run:RabbitRunRecord,job:FeedbackRecord){this.checkRemoteRecord(run,job);return {recordId:run.id,state:run.receipt?'accepted' as const:run.unresolvedSubmission||['unknown','submitting'].includes(run.phase)?'unknown' as const:'rejected' as const,...(run.receipt?{runId:run.receipt.run_id}:{})};}
  private syncConversation(snapshot:FeedbackSnapshot){for(const job of snapshot.jobs){if(!job.sessionId||this.options.isSessionBusy?.(job.sessionId))continue;try{const s=this.options.sessions.get(job.sessionId);if(s.agentId!==job.agentId)continue;
   if(!s.messages.some(m=>m.id===job.id))s.messages.push({id:job.id,role:'user',text:job.title+'\n\n'+job.description,createdAt:job.createdAt,status:'completed'});

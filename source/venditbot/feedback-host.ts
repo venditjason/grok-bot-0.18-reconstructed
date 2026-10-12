@@ -1,4 +1,4 @@
-import {feedbackInput,FEEDBACK_REPOSITORY,type FeedbackInput,type FeedbackJob,type FeedbackSnapshot,type FeedbackBinding,type FeedbackAgent,type FeedbackMergeProof} from '../shared/feedback.js';
+import {feedbackInput,FEEDBACK_REPOSITORY,type FeedbackInput,type FeedbackJob,type FeedbackSnapshot,type FeedbackBinding,type FeedbackAgent,type FeedbackMergeProof,type FeedbackDraftProof} from '../shared/feedback.js';
 import {FeedbackStore,type FeedbackRecord,validateFeedbackBinding} from './feedback-store.js';
 export type FeedbackProgress={state:'running'|'blocked'|'failed'|'ready_for_validation'|'unknown';message?:string};
 export type FeedbackRemote={state:'accepted'|'rejected'|'unknown';recordId:string;runId?:string;message?:string};
@@ -12,6 +12,7 @@ export interface FeedbackHostPort {
  localAvailable(job:FeedbackRecord):boolean;
  dispatchLocal(job:FeedbackRecord):Promise<FeedbackAgent>;
  observeLocal(job:FeedbackRecord):Promise<FeedbackProgress>;
+ verifyDraft?(job:FeedbackRecord):Promise<FeedbackDraftProof|undefined>;
  verifyMerge(job:FeedbackRecord):Promise<FeedbackMergeProof|undefined>;
  assertMutable():void;
  changed(snapshot:FeedbackSnapshot):void;
@@ -58,6 +59,11 @@ export class FeedbackHost {
   if(r.status==='merged'||r.dispatch==='not_started')return;
   const progress:FeedbackProgress=await (r.route==='rabbit'?this.port.observeRemote(r):r.route==='local'?this.port.observeLocal(r):Promise.resolve({state:'unknown' as const}));
   if(progress.state==='ready_for_validation'){
+   const draft=await this.port.verifyDraft?.(r);
+   if(draft){
+    if(draft.repository!==FEEDBACK_REPOSITORY||draft.draft!==true||draft.checksPassed!==true||!/^[a-f0-9]{40}$/.test(draft.headSha)||!/^https:\/\/github\.com\/venditjason\/grok-bot-0\.18-reconstructed\/pull\/[1-9]\d*$/.test(draft.prUrl)||!/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$/.test(draft.verificationId))throw new Error('invalid_verified_draft_proof');
+    this.change(id,{status:'ready_for_review',dispatch:'settled',prUrl:draft.prUrl,headSha:draft.headSha,verificationId:draft.verificationId,message:'수정·테스트·독립 검토 증빙과 동일 커밋의 draft PR을 확인했습니다. PR 검토를 기다립니다.'});return;
+   }
    let current=this.change(id,{status:'validating',message:'실행 결과는 도착했습니다. 실제 테스트 결과와 동일 PR의 병합 증빙을 확인합니다.'});
    const proof=await this.port.verifyMerge(current);if(!proof){this.change(id,{status:'blocked',dispatch:'settled',message:'실행 결과만 확인했습니다. 테스트 성공과 PR 병합을 검증할 실행기/권한이 없어 완료 처리하지 않았습니다.'});return;}
    if(!mergeProof(proof))throw new Error('invalid_verified_merge_proof');

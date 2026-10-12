@@ -1,9 +1,11 @@
+import {ClaudeWebEvents} from "./native-web-events.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { CodexTurnEvent, ProviderMessage } from "./provider-auth-runtime.js";
 
 export type ClaudeTurnEvent = Exclude<CodexTurnEvent, { type: "done" }> | (Extract<CodexTurnEvent, { type: "done" }> & { sessionId: string });
 export interface ClaudeMcpServer { url: string; token: string }
 export interface ClaudeCliTurnOptions {
+  nativeWebSearch?: boolean;
   executable: string; cwd: string; env: NodeJS.ProcessEnv;
   messages: readonly ProviderMessage[]; model?: string; effort?: string; systemInstructions?: string; sessionId?: string; signal?: AbortSignal; timeoutMs?: number;
   /** Caller supplies completed history only and discloses this context transfer. */
@@ -64,10 +66,11 @@ export async function* streamClaudeCliTurn(options: ClaudeCliTurnOptions): Async
   if (options.signal?.aborted) throw new DOMException("요청이 취소되었습니다.", "AbortError");
   if (options.systemInstructions != null && options.systemInstructions.length > 32_000) throw new Error("에이전트 지침은 32,000자 이하여야 합니다.");
   const mcp = claudeMcpOptions(options.mcpServer);
-  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", "", "--strict-mcp-config", "--mcp-config", mcp.config, "--setting-sources", "", "--permission-mode", "default", "--max-turns", options.mcpServer ? "8" : "1", ...(options.mcpServer ? ["--allowedTools", "mcp__venditbot__*"] : []), "--system-prompt", `You are 벤디트봇 (VenditBot), a concise desktop assistant. Use only tools explicitly supplied by VenditBot. Tool permissions and workspace scope are enforced by the app.${options.systemInstructions ? `\n\nAgent instructions:\n${options.systemInstructions}` : ""}`, ...(options.model ? ["--model", options.model] : []), ...(options.effort ? ["--effort", options.effort] : []), ...(options.sessionId ? ["--resume", options.sessionId, "--fork-session"] : [])];
+  const args = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--tools", options.nativeWebSearch === true ? "WebSearch" : "", "--strict-mcp-config", "--mcp-config", mcp.config, "--setting-sources", "", "--permission-mode", "default", "--max-turns", options.mcpServer || options.nativeWebSearch ? "8" : "1", ...((options.mcpServer || options.nativeWebSearch) ? ["--allowedTools", [options.mcpServer ? "mcp__venditbot__*" : "", options.nativeWebSearch ? "WebSearch" : ""].filter(Boolean).join(",")] : []), "--system-prompt", `You are 벤디트봇 (VenditBot), a concise desktop assistant. Use only tools explicitly supplied by VenditBot. Tool permissions and workspace scope are enforced by the app.${options.systemInstructions ? `\n\nAgent instructions:\n${options.systemInstructions}` : ""}`, ...(options.model ? ["--model", options.model] : []), ...(options.effort ? ["--effort", options.effort] : []), ...(options.sessionId ? ["--resume", options.sessionId, "--fork-session"] : [])];
   if(streamJson)args.push('--input-format','stream-json');
   const child = spawn(options.executable, args, { cwd: options.cwd, env: { ...options.env, ...mcp.env, ENABLE_CLAUDEAI_MCP_SERVERS: "false", CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }, stdio: "pipe", windowsHide: true });
   options.onChild?.(child);
+  const webEvents = new ClaudeWebEvents();
   const queue: any[] = []; let buffer = ""; let text = ""; let failure: Error | undefined; let exited = false; let exitCode: number | null = null;
   let wake: (() => void) | undefined; let final: any; let outputBytes = 0; let stopped = false;
   const stop = () => {
@@ -100,6 +103,10 @@ export async function* streamClaudeCliTurn(options: ClaudeCliTurnOptions): Async
       if (failure != null) throw failure;
       const message = queue.shift();
       if (message == null) { await new Promise<void>(resolveWake => { wake = resolveWake; }); wake = undefined; continue; }
+      for (const event of webEvents.read(message)) {
+        if (options.nativeWebSearch !== true) throw Error('승인되지 않은 공식 웹 검색 이벤트입니다.');
+        yield event;
+      }
       if (message.type === "stream_event" && message.event?.type === "content_block_delta" && message.event.delta?.type === "text_delta") {
         const delta = message.event.delta.text;
         if (typeof delta === "string") { text += delta; yield { type: "text-delta", delta }; }

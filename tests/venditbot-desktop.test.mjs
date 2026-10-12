@@ -22,6 +22,9 @@ const built = await build({
     builder.onResolve({filter: /\/local-updater\.js$/}, () => ({path: 'updater', namespace: 'updater-test'}));
     builder.onLoad({filter: /.*/, namespace: 'updater-test'}, () => ({contents:
       'export const LocalUpdater = globalThis.__venditbotDesktopElectron.LocalUpdater;', loader: 'js'}));
+    builder.onResolve({filter: /\/public-web\.js$/}, () => ({path:'public-web',namespace:'public-web-test'}));
+    builder.onLoad({filter:/.*/,namespace:'public-web-test'}, () => ({contents:
+      `export {publicUrl} from ${JSON.stringify(path.resolve('source/venditbot/public-web.ts'))}; const port=globalThis.__venditbotDesktopElectron; export const getPublicWeb=(...args)=>port.webGet(...args);`,loader:'js',resolveDir:process.cwd()}));
     builder.onResolve({filter: /\/quit-watchdog\.js$/}, () => ({path: 'watchdog', namespace: 'watchdog-test'}));
     builder.onLoad({filter: /.*/, namespace: 'watchdog-test'}, () => ({contents:
       'const port = globalThis.__venditbotDesktopElectron; export const startQuitWatchdog = options => port.watchdogs.push(options);', loader: 'js'}));
@@ -529,7 +532,7 @@ test('approved workspace writes persist canonical tool history and are not repla
   assert.equal(saved.messages[1].tools[0].status, 'completed'); assert.deepEqual(saved.messages[1].tools[0].input, {path: 'approved.txt', content: '승인된 내용'});
   assert.equal(saved.messages[1].tools[0].output.written, true);
   const toolResult = api.requests[1].body.messages.find(message => message.role === 'tool'); assert.equal(JSON.parse(toolResult.content).written, true);
-  assert.deepEqual(api.requests[0].body.tools.map(tool => tool.function.name), ['list_files', 'read_file', 'search_files', 'write_file']);
+  assert.deepEqual(api.requests[0].body.tools.map(tool => tool.function.name), ['read_web_page', 'get_weather', 'list_files', 'read_file', 'search_files', 'write_file']);
   api.enqueue(({response}) => finish(response, '이전 작업 확인'));
   await runToEnd(f, session.id, '이전에 무엇을 했나요?');
   const nextHistory = api.requests[2].body.messages; assert.equal(nextHistory.filter(message => message.role === 'tool').length, 1);
@@ -563,7 +566,7 @@ test('a model cannot gain workspace tools in a conversation without a native fol
   const session = await f.call('createSession', {connectionId: selected.id});
   api.enqueue(({response}) => toolReply(response, 'unauthorized.txt', 'must not write'));
   const saved = await runToEnd(f, session.id, '권한 없는 모델 요청');
-  assert.equal(saved.messages[1].status, 'failed'); assert.equal(api.requests[0].body.tools, undefined);
+  assert.equal(saved.messages[1].status, 'failed'); assert.deepEqual(api.requests[0].body.tools.map(x=>x.function.name).sort(),['get_weather','read_web_page']);
   assert.equal(f.events.filter(event => event.type === 'tool-approval' || event.type === 'tool-status').length, 0);
   assert.equal(api.requests.length, 1); assert.deepEqual(api.failures, []);
 });
@@ -1780,4 +1783,38 @@ test('chat FIFO failure pauses next input, explicit retry includes preserved att
  const firstId=randomUUID(),nextId=randomUUID();await f.call('send',{requestId:firstId,sessionId:session.id,text:'first'});await api.request(0);await f.call('send',{requestId:nextId,sessionId:session.id,text:'next'});
  const failed=f.event(e=>e.type==='chat-turns'&&e.turns[0]?.status==='failed');gate.resolve();await failed;await nextTurn();assert.equal(api.requests.length,1);assert.deepEqual((await f.call('state')).chatTurns.map(turn=>turn.status),['failed','paused']);
  const done=f.event(e=>e.type==='chat-turns'&&e.turns.every(turn=>turn.status==='completed'));await f.call('retryChatTurn',{id:firstId});await done;assert.equal(api.requests.length,3);assert.deepEqual(api.failures,[]);
+});
+
+test('public web and weather tools run in ordinary chat through actual IPC/tool dispatch and retain source evidence',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:true,images:false,structuredOutput:false}}),session=await f.call('createSession',{connectionId:selected.id,model:selected.model});let requests=0;
+ f.port.webGet=async(url,signal)=>{assert.equal(signal.aborted,false);requests++;return {url,status:200,headers:{'content-type':url.includes('api.met.no')?'application/json':'text/html'},retrievedAt:new Date().toISOString(),body:url.includes('api.met.no')?JSON.stringify({properties:{meta:{updated_at:new Date().toISOString()},timeseries:[{time:new Date(Date.now()+3600000).toISOString(),data:{instant:{details:{air_temperature:19,wind_speed:2}}}}]}}):'<title>Public source</title><p>Verified fixture</p><script>bad()</script>'};};
+ api.enqueue(({body,response})=>{assert.ok(body.tools.some(t=>t.function.name==='read_web_page'));assert.ok(body.tools.some(t=>t.function.name==='get_weather'));assert.match(JSON.stringify(body.messages),/네이티브 웹 검색은 제공되지/);teamTool(response,'read_web_page',{url:'https://example.com/'},'web-read');});
+ api.enqueue(({body,response})=>{const result=JSON.parse(body.messages.find(x=>x.role==='tool').content);assert.equal(result.untrusted,true);assert.equal(result.title,'Public source');teamTool(response,'get_weather',{latitude:35.18,longitude:129.07,location:'Busan'},'weather-read');});
+ api.enqueue(({body,response})=>{const results=body.messages.filter(x=>x.role==='tool').map(x=>JSON.parse(x.content));assert.equal(results.at(-1).kind,'forecast');assert.equal(results.at(-1).observed_at,null);assert.equal(results.at(-1).source,'MET Norway');finish(response,'공개 자료와 MET Norway 예보를 조회했습니다.');});
+ const saved=await runToEnd(f,session.id,'공개 페이지와 부산 날씨를 확인해');assert.equal(requests,2);assert.deepEqual(saved.messages.at(-1).tools.map(x=>[x.name,x.status]),[['read_web_page','completed'],['get_weather','completed']]);assert.deepEqual(api.failures,[]);
+});
+test('denied web read is recorded as failed and never calls public transport',async t=>{
+ const f=await fixture(t),api=await f.api(),selected=await configured(f,api,{capabilities:{tools:true,images:false,structuredOutput:false}}),session=await f.call('createSession',{connectionId:selected.id,model:selected.model});let calls=0;f.port.webGet=async()=>{calls++;throw Error('must not fetch');};await changeRules(f,{defaultMode:'ask'});
+ api.enqueue(({response})=>teamTool(response,'read_web_page',{url:'https://example.com/'},'denied-web'));api.enqueue(({response})=>finish(response,'승인하지 않아 조회하지 못했습니다.'));
+ const approval=f.event(x=>x.type==='tool-approval'&&x.tool==='read_web_page'),end=f.event(x=>x.type==='run-end'&&x.sessionId===session.id);await f.call('send',{sessionId:session.id,text:'페이지 확인'});await f.call('respondApproval',{approvalId:(await approval).approvalId,approved:false});await end;
+ assert.equal(calls,0);assert.equal((await f.session(session.id)).messages.at(-1).tools[0].status,'failed');assert.deepEqual(api.failures,[]);
+});
+for(const allowed of [true,false])test(`official native web search follows app approval (${allowed}) without broadening CLI tools`,async t=>{
+ const f=await fixture(t,{codexRuntime:true});const catalog=await f.call('listModels',{provider:'codex'}),model=catalog.models.find(m=>m.isDefault)?.id??catalog.models[0].id;const session=await f.call('createSession',{connectionId:'codex',model});await changeRules(f,{defaultMode:'ask'});
+ const approval=f.event(x=>x.type==='tool-approval'&&x.tool==='native_web_search'),end=f.event(x=>x.type==='run-end'&&x.sessionId===session.id);await f.call('send',{sessionId:session.id,text:'공식 웹 검색으로 날씨를 확인해'});await f.call('respondApproval',{approvalId:(await approval).approvalId,approved:allowed});await end;
+ const saved=await f.session(session.id),tools=saved.messages.at(-1).tools??[];assert.equal(tools.filter(x=>x.name==='native_web_search').length,allowed?1:0);if(allowed){assert.equal(tools[0].status,'completed');assert.ok(f.events.some(x=>x.type==='tool-status'&&x.name==='native_web_search'&&x.status==='running'));}
+ const lines=(await readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8')).trim().split('\n').map(JSON.parse),thread=lines.find(x=>x.method==='thread/start').params;assert.equal(thread.config.web_search,allowed?'live':'disabled');assert.equal(thread.sandbox,'read-only');assert.equal(thread.config.features.shell_tool,false);assert.equal(thread.config.features.apply_patch_freeform,false);
+});
+
+test('cancelled native Claude search stays failed in durable tool log, without losing the user message',async t=>{
+ const f=await fixture(t,{claudeRuntime:true}),session=await f.call('createSession',{connectionId:'claude-code',model:'mock-claude-model'});
+ const running=f.event(x=>x.type==='tool-status'&&x.name==='native_web_search'&&x.status==='running'),end=f.event(x=>x.type==='run-end'&&x.sessionId===session.id);
+ await f.call('send',{sessionId:session.id,text:'web-hang'});await running;await f.call('cancel',{sessionId:session.id});await end;
+ const saved=await f.session(session.id);assert.equal(saved.messages.at(-2).text,'web-hang');assert.equal(saved.messages.at(-1).status,'cancelled');assert.equal(saved.messages.at(-1).tools[0].status,'failed');assert.match(saved.messages.at(-1).tools[0].summary,/중단/);
+});
+
+test('explicit user no-search instruction leaves native search disabled with no permission prompt',async t=>{
+ const f=await fixture(t,{codexRuntime:true}),catalog=await f.call('listModels',{provider:'codex'}),model=catalog.models[0].id,session=await f.call('createSession',{connectionId:'codex',model});await changeRules(f,{defaultMode:'ask'});
+ const saved=await runToEnd(f,session.id,'웹 검색하지 말고 이 문장만 다듬어줘');assert.equal(saved.messages.at(-1).status,'completed');assert.equal(f.events.filter(x=>x.type==='tool-approval'&&x.tool==='native_web_search').length,0);assert.equal((saved.messages.at(-1).tools??[]).length,0);
+ const lines=(await readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.equal(lines.find(x=>x.method==='thread/start').params.config.web_search,'disabled');
 });
