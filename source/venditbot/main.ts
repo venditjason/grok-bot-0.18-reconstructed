@@ -9,14 +9,16 @@ import { SandSettingsStore } from '../shared/node/settings/sand-settings-store.j
 import { apiProfileSecretKey, normalizeApiProviderProfile, type ApiProviderProfile } from '../shared/api-provider-config.js';
 import { streamApiProvider, validateApiProviderConnection } from '../host/extensions/inference/api-provider-transport.js';
 import { configureProviderAuthRuntime, beginProviderLogin, getProviderAuthStatus, cancelProviderLogin, disconnectProvider, testProviderConnection, shutdownProviderAuthRuntime, shutdownProviderAuthRuntimeForUpdate, runCodexTurn, runClaudeTurn, listProviderModels, type LoginProvider } from '../shared/node/provider-auth-runtime.js';
+import {FeedbackTools, FEEDBACK_TOOL_POLICY, explicitAppFeedbackRequest} from './feedback-tools.js';
 import {FeedbackMainAdapter} from './feedback-main-adapter.js';
 import {feedbackGithubInput, feedbackGithubProofResponse} from './feedback-github-proof.js';
 import type {FeedbackBinding} from '../shared/feedback.js';
 import {ChatAttachmentStore} from './chat-attachments.js';
 import type {ChatAttachment} from '../shared/chat-attachments.js';
 import { LocalSessionStore, EncryptedSecretStore, safeError, completedHistory, sessionMarkdown, connectionRoutes, connectionRouteKey, validConnections, type ConnectionRoute, type ConnectionAttempt, type ChatSession, type ChatMessage, type ToolRecord } from './local-store.js';
-import { WORKSPACE_TOOLS, WorkspaceExecutor, normalizeWorkspace, startMcpGateway, type WriteApproval, type ActionApprovalRequest, type McpGateway } from './workspace-tools.js';
+import { WORKSPACE_TOOLS, WORKSPACE_DEVELOPMENT_POLICY, sensitiveWorkspaceContent, WorkspaceExecutor, normalizeWorkspace, startMcpGateway, type WriteApproval, type ActionApprovalRequest, type McpGateway } from './workspace-tools.js';
 import { AgentStore, type AgentProfile } from './agent-store.js';
+import {ChatTurnQueue} from './chat-turn-queue.js';
 import { TaskQueue } from './task-queue.js';
 import { TeamStore, activeTeamRun } from './team-store.js';
 import { TeamCoordinator } from './team-coordinator.js';
@@ -156,14 +158,25 @@ const appConnectors = new AppConnectorManager({root: paths.profileRoot, secrets,
     if (credentialMutation) throw new Error('보안 저장소 변경이 끝난 뒤 다시 시도하세요.');
   },
 });
+let chatTurns: ChatTurnQueue | undefined;
 const taskQueue = new TaskQueue({maxQueued: 16,
-  onChange: snapshot => { emit({type: 'queue', ...snapshot}); teams?.schedule(); },
+  onChange: snapshot => { emit({type: 'queue', ...snapshot}); teams?.schedule(); chatTurns?.schedule(); },
   onError: (sessionId, error) => {
     if (activeRun?.sessionId === sessionId) activeRun = null;
     const message = safeError(error);
     try { const session = readSession(sessionId); session.taskStatus = 'failed'; for (const item of session.messages) if (item.status === 'running') {item.status = 'failed'; item.error = message;} try {saveSession(session);} catch {} emit({type: 'session', session}); } catch {}
     emit({type: 'run-end', sessionId, error: message});
   },
+});
+chatTurns = new ChatTurnQueue(paths.profileRoot, {
+  canRun: () => !quitPending && !quitting && !updatePending && !credentialMutation,
+  state: () => taskQueue.state(),
+  start: (turn, hooks) => {enqueueSession(turn.sessionId, turn.text, {
+    started: hooks.started,
+    settled: (session, error) => hooks.settled(session.taskStatus ?? 'failed', error),
+  }, run, turn.attachments);},
+  cancel: cancelSession,
+  changed: (turns, error) => emit({type: 'chat-turns', turns, ...(error ? {error} : {})}),
 });
 teams = new TeamCoordinator(teamStore, {
   createSessions: run => {
@@ -304,7 +317,7 @@ function cancelSession(id: string): boolean {
 }
 function settleJob(id: string, error?: unknown): void { const hooks = jobHooks.get(id); jobHooks.delete(id); hooks?.settled(readSession(id), error); }
 function state() {
-  return { feedback: feedback.host.snapshot(), appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
+  return { chatTurns: chatTurns?.snapshot(), chatTurnStorageError: chatTurns?.error(), feedback: feedback.host.snapshot(), appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
 }
 function enqueueSession(sessionId: string, text: string, hooks?: {started(): void; settled(session: ChatSession, error?: unknown): void}, operation = run, attachments?:ChatAttachment[]): {started: boolean; queued: boolean; sessionId: string} {
   const session = readSession(sessionId), queue = taskQueue.state();
@@ -530,7 +543,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
   };
   const boundRecords = session.development ? rabbitStore.listRuns().filter(record => record.connectionId === session.development!.connectionId && record.source && (record.source.sessionId === sessionId || !!session.teamRunId && record.source.teamRunId === session.teamRunId && record.source.agentId === session.agentId)).map(record => ({id: record.id, phase: record.phase, state: record.detail?.state})).slice(0,100) : [];
   const projectInstructions = session.agentId && session.purpose !== 'avatar' ? (session.development ? `${developmentInstructions(session.development)}\n기존 원격 실행 기록(새 요청으로 반복하지 마세요): ${JSON.stringify(boundRecords)}` : rabbit.instructions(projectTaskText(), projectSource)) : '';
-  let systemInstructions = [session.instructions, projectInstructions].filter(Boolean).join('\n\n');
+  let systemInstructions = [session.instructions, session.agentId && session.purpose !== 'avatar' ? FEEDBACK_TOOL_POLICY : '', session.workspacePath && session.purpose !== 'avatar' ? WORKSPACE_DEVELOPMENT_POLICY : '', projectInstructions].filter(Boolean).join('\n\n');
   const authorizeWorkspace = async (request: ActionApprovalRequest) => {
     if (request.operation === 'write') {assertDevelopmentWriteAllowed(session.development); rabbit.assertLocalWrite(projectTaskText(), projectSource);}
     const allowed = await authorize(request);
@@ -574,16 +587,25 @@ async function run(sessionId: string, text: string, controller: AbortController)
       reason: id && operation !== 'list_read_tools' ? `${id}에서 조회한 자료가 현재 AI 연결로 전달됩니다.` : '연결된 앱의 읽기 도구를 확인합니다.',
       preview: JSON.stringify({app: id, operation, args}).slice(0, 4000)}),
   }, controller.signal) : undefined;
+  const appFeedbackTools = session.agentId && session.purpose !== 'avatar' ? new FeedbackTools({
+    existing: id => feedback.host.snapshot().jobs.find(job => job.id === id),
+    submit: input => feedback.host.submit(input),
+    authorizeSubmit: input => authorizeAction({path: '.', operation: 'manage', tool: 'submit_app_feedback', category: 'routine',
+      ...(sensitiveWorkspaceContent(JSON.stringify(input)) ? {categories: ['sensitive_disclosure'], preview: '[민감정보 형태 감지 — 미리보기 숨김]'} : {preview: JSON.stringify(input).slice(0, 8000)}),
+      reason: '벤디트봇 자체 버그·개선 요청을 기존 리포트 개발 경로에 저장합니다. 저장은 개발 완료가 아닙니다.',
+    }, controller.signal, sessionId, !explicitAppFeedbackRequest(projectTaskText())),
+  }, sessionId, answer.id, controller.signal) : undefined;
   const agentTools = currentAgent ? new AgentManagementTools({agentId: currentAgent.id, expectedUpdatedAt: currentAgent.updatedAt, renameAgent: renameSavedAgent, signal: controller.signal}) : undefined;
   const execute = async (definition: {name?: unknown}, args: unknown, callId: string): Promise<unknown> => {
     if (finalized || controller.signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
     if (typeof definition.name !== 'string') throw new Error('도구 이름을 확인하세요.');
+    const isFeedbackTool = appFeedbackTools?.definitions.some(tool => tool.name === definition.name);
     const isTeamTool = teamTools?.definitions.some(tool => tool.name === definition.name);
     const isAgentTool = agentTools?.definitions.some(tool => tool.name === definition.name);
     const isProjectTool = projectTools?.definitions.some(tool => tool.name === definition.name);
     const isRoutineTool = routineTools?.definitions.some(tool => tool.name === definition.name);
     const isConnectorTool = connectorTools?.definitions.some(tool => tool.name === definition.name);
-    if (!isTeamTool && !isAgentTool && !isProjectTool && !isRoutineTool && !isConnectorTool && !executor) throw new Error('작업 폴더를 선택한 대화에서만 파일 도구를 사용할 수 있습니다.');
+    if (!isFeedbackTool && !isTeamTool && !isAgentTool && !isProjectTool && !isRoutineTool && !isConnectorTool && !executor) throw new Error('작업 폴더를 선택한 대화에서만 파일 도구를 사용할 수 있습니다.');
     const raw = args && typeof args === 'object' ? args as Record<string, unknown> : {};
     answer.tools ??= []; const prior = answer.tools.find(t => t.callId === callId);
     const record: ToolRecord = prior ?? {callId, name: definition.name, ...(typeof raw.path === 'string' ? {path: raw.path} : {}), status: 'running', input: structuredClone(raw)};
@@ -592,7 +614,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
     try {
       if ((isTeamTool || isAgentTool) && !await authorize({path: '.', operation: 'manage', tool: definition.name, category: 'routine', reason: '현재 에이전트 또는 팀 범위의 작업 도구입니다.'})) throw new Error('사용자가 이 작업을 승인하지 않았습니다.');
       if (finalized || controller.signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
-      const result = isConnectorTool ? await connectorTools!.execute(definition.name, args, callId) : isRoutineTool ? await routineTools!.execute(definition.name, args, callId) : isTeamTool ? await teamTools!.execute(definition.name, args, callId) : isAgentTool ? await agentTools!.execute(definition.name, args, callId) : isProjectTool ? await projectTools!.execute(definition.name, args, callId) : await executor!.execute(definition.name, args, callId);
+      const result = isFeedbackTool ? await appFeedbackTools!.execute(definition.name, args, callId) : isConnectorTool ? await connectorTools!.execute(definition.name, args, callId) : isRoutineTool ? await routineTools!.execute(definition.name, args, callId) : isTeamTool ? await teamTools!.execute(definition.name, args, callId) : isAgentTool ? await agentTools!.execute(definition.name, args, callId) : isProjectTool ? await projectTools!.execute(definition.name, args, callId) : await executor!.execute(definition.name, args, callId);
       record.output = structuredClone(result);
       record.status = 'completed'; record.summary = definition.name === 'write_file' ? ((result as {written?: boolean}).written ? '파일을 저장했습니다.' : '파일 수정을 거절했습니다.') : '완료';
       return result;
@@ -630,7 +652,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
     }
     if(JSON.stringify(history).length>24*1024*1024)throw Error('첨부 문맥이 너무 큽니다. 새 대화에서 필요한 파일만 첨부해 주세요.');
     if (session.workspacePath) executor = new WorkspaceExecutor(session.workspacePath, approve, controller.signal, authorizeWorkspace);
-    const tools = [...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
+    const tools = [...(appFeedbackTools?.definitions ?? []), ...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
     const routes = connectionRoutes(session);
     for (const [index, route] of routes.entries()) {
       if (controller.signal.aborted) throw new DOMException('중단했습니다.', 'AbortError');
@@ -728,7 +750,7 @@ function assertUpdateIdle(): void {
   assertIdle();
   if (secrets.isPending()) throw new Error('macOS 보안 저장소 요청이 처리 중입니다. 시스템 확인을 마친 뒤 업데이트하세요.');
   if (avatarJobs.active().length || pendingRequests) throw new Error('진행 중인 설정·연결·프로필 작업을 마친 뒤 업데이트하세요.');
-  if (unsavedSessions.size || unsavedTeamRunIds.length || unsavedRabbitRunIds.length) throw new Error('저장되지 않은 작업이 있습니다. 저장 문제를 해결하고 작업을 보관한 뒤 업데이트하세요.');
+  if (chatTurns?.error() || unsavedSessions.size || unsavedTeamRunIds.length || unsavedRabbitRunIds.length) throw new Error('저장되지 않은 작업이 있습니다. 저장 문제를 해결하고 작업을 보관한 뒤 업데이트하세요.');
 }
 function startUpdateChecks(): void {
   if (paths.development || updateTimer) return;
@@ -1040,14 +1062,15 @@ async function request(method: string, raw: unknown): Promise<unknown> {
     }
     case 'deleteSession': {
       assertIdle(); const id = string(args.id); if (teams.sessionRun(id)) throw new Error('팀 작업이 참조하는 대화입니다. 팀 작업을 내보낸 뒤 팀 기록을 먼저 삭제하세요.');
-      sessions.remove(id); if (unsavedSessions.delete(id)) emitStorage(); return state();
+      chatTurns?.removeSession(id); sessions.remove(id); if (unsavedSessions.delete(id)) emitStorage(); return state();
     }
     case 'exportSession': {
       if (!window) return {saved: false}; const session = readSession(string(args.id)); const format = args.format === 'json' ? 'json' : 'markdown';
       const extension = format === 'json' ? 'json' : 'md';
       const result = await dialog.showSaveDialog(window, {title: '대화 내보내기', defaultPath: `벤디트봇-${session.id.slice(0,8)}.${extension}`, filters: [{name: format === 'json' ? 'JSON' : 'Markdown', extensions: [extension]}]});
       if (result.canceled || !result.filePath) return {saved: false};
-      exportPrivate(result.filePath, format === 'json' ? JSON.stringify({version: 1, session}, null, 2) : sessionMarkdown(session));
+      const queuedMessages = chatTurns?.snapshot().filter(turn => turn.sessionId === session.id && turn.status !== 'completed') ?? [];
+      exportPrivate(result.filePath, format === 'json' ? JSON.stringify({version: 1, session, ...(queuedMessages.length ? {queuedMessages} : {})}, null, 2) : sessionMarkdown(session) + (queuedMessages.length ? '\n\n' + queuedMessages.map(turn => `## 대기 메시지 (${turn.status})\n\n${turn.text}\n${turn.attachments.map(file => file.name).join(', ')}`).join('\n\n') : ''));
       return {saved: true, path: result.filePath};
     }
     case 'send': {
@@ -1056,8 +1079,14 @@ async function request(method: string, raw: unknown): Promise<unknown> {
       if (session.purpose === 'avatar') throw new Error('프로필 그림 생성 작업입니다. 에이전트 편집 화면에서 다시 생성하세요.');
       if (session.teamRunId) throw new Error('팀에서 관리하는 작업입니다. 팀 대화방에 메시지를 보내거나 새 팀 작업을 시작하세요.');
       const attachments=chatAttachments.resolve(args.attachmentIds);const text = string(args.text, 100_000).trim() || (attachments.length?'첨부한 자료를 확인해 주세요.':''); if (!text) throw new Error('메시지를 입력하세요.');
-      return enqueueSession(sessionId, text,undefined,run,attachments);
+      const wasIdle = !taskQueue.state().running.length;
+      const turn = chatTurns!.submit({id: args.requestId == null ? randomUUID() : string(args.requestId, 100), sessionId, text, attachments});
+      const started = wasIdle && taskQueue.state().running.includes(sessionId);
+      return {...turn, started, queued: !started && turn.status === 'queued'};
     }
+    case 'retryChatTurn': chatTurns!.retry(string(args.id)); return state();
+    case 'cancelChatTurn': chatTurns!.cancel(string(args.id)); return state();
+    case 'resumeChatTurns': chatTurns!.resume(string(args.sessionId)); return state();
     case 'cancel': {
       const id = args.sessionId == null ? activeRun?.sessionId : string(args.sessionId); if (!id) return {cancelled: false};
       const teamRun = teams.sessionRun(id); if (teamRun && activeTeamRun(teamRun)) { teams.cancel(teamRun.id); return {cancelled: true}; }
@@ -1099,7 +1128,7 @@ function exportPrivate(path: string, content: string): void {
       }
       // Cancellation cleanup can be the first write that discovers a disk error.
       // Recheck only after settlement, while the renderer remains open to export.
-      if (unsavedSessions.size || unsavedTeamRunIds.length || unsavedRabbitRunIds.length) {
+      if (chatTurns?.error() || unsavedSessions.size || unsavedTeamRunIds.length || unsavedRabbitRunIds.length) {
         if (!window || window.isDestroyed()) return;
         const {response} = await dialog.showMessageBox(window, {type: 'warning', title: '저장되지 않은 작업', message: '저장되지 않은 작업이 있습니다.', detail: '종료하면 메모리에만 남아 있는 응답이 사라집니다. 앱으로 돌아가 작업을 내보내거나 저장 문제를 해결하세요.', buttons: ['앱으로 돌아가기', '저장하지 않고 종료'], defaultId: 0, cancelId: 0, noLink: true});
         if (response !== 1) return;

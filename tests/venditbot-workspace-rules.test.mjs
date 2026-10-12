@@ -13,15 +13,17 @@ test('host classifies new files, overwrites and security configuration independe
   const root=await fixture(t),requests=[];
   const host=new WorkspaceExecutor(root,async()=>{throw Error('legacy callback must not bypass policy');},undefined,async request=>{requests.push(request);return request.category==='routine';});
   assert.equal((await host.execute('write_file',{path:'notes.txt',content:'new notes'},'new')).written,true);
+  await host.execute('read_file',{path:'notes.txt'},'read-current');
   assert.equal((await host.execute('write_file',{path:'notes.txt',content:'overwrite'},'old')).written,false);
   assert.equal((await host.execute('write_file',{path:'package.json',content:'{}'},'config')).written,false);
   assert.equal(await readFile(path.join(root,'notes.txt'),'utf8'),'new notes');
-  assert.deepEqual(requests.map(r=>r.categories),[[],['destructive_change'],['security_change']]);
+  assert.deepEqual(requests.filter(r=>r.operation==='write').map(r=>r.categories),[[],['destructive_change'],['security_change']]);
   await assert.rejects(host.execute('write_file',{path:'b.txt',content:'x',category:'routine'},'extra'),/인자/);
 });
 test('all applicable risks survive classification and sensitive previews never include their contents',async t=>{
   const root=await fixture(t);await writeFile(path.join(root,'package.json'),'{}');let observed;
-  const host=new WorkspaceExecutor(root,async()=>false,undefined,async r=>{observed=r;return false;});
+  const host=new WorkspaceExecutor(root,async()=>false,undefined,async r=>{observed=r;return r.operation==='read';});
+  await host.execute('read_file',{path:'package.json'},'read-current');
   await host.execute('write_file',{path:'package.json',content:'{"contact":"fictional@example.invalid"}'},'sensitive-write');
   assert.deepEqual(observed.categories,['sensitive_disclosure','security_change','destructive_change']);
   assert.doesNotMatch(observed.preview,/fictional@example/);assert.equal(await readFile(path.join(root,'package.json'),'utf8'),'{}');

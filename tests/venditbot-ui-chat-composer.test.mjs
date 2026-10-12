@@ -55,3 +55,9 @@ test('restored metadata rejects duplicates, invalid names and aggregate excess',
  assert.equal(attachmentDrafts({'agent:a':[file(),file()]}),undefined);assert.equal(attachmentDrafts({'agent:a':[{...file(),name:'../secret'}]}),undefined);
  const images=Array.from({length:4},(_,i)=>({...file(`${i}`.repeat(8)+'-1111-4111-8111-111111111111'),kind:'image',mimeType:'image/png',bytes:4*1024*1024}));assert.equal(attachmentDrafts({'agent:a':images}),undefined);
 });
+
+test('queue-enabled composer keeps typing, attachment, submit and cancel controls together during response',async t=>{
+ let sent=0,cancelled=0;const v=mount(t,React.createElement(ChatComposer,{value:'다음 질문',onChange(){},onSend(){sent++;},onCancel(){cancelled++;},onChooseAttachments(){},queueWhileRunning:true}));
+ const field=v.host.querySelector('textarea');assert.equal(field.disabled,false);assert.ok([...v.host.querySelectorAll('button')].some(node=>node.textContent==='대기열에 추가'));assert.ok([...v.host.querySelectorAll('button')].some(node=>node.textContent==='응답 중단'));
+ flushSync(()=>field.dispatchEvent(new browser.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true})));assert.equal(sent,1);assert.equal(cancelled,0);click([...v.host.querySelectorAll('button')].find(node=>node.textContent==='응답 중단'));assert.equal(cancelled,1);assert.equal(sent,1);
+});
