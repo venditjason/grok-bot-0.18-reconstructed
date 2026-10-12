@@ -6,7 +6,7 @@ export type FeedbackGithubInput={prNumber:number;headSha:string;baseRef:string};
 const sha=(v:unknown):v is string=>typeof v==='string'&&/^[a-f0-9]{40}$/.test(v);
 /** Consumes only the exact PR/head emitted by this accepted Rabbit request. */
 export function feedbackGithubInput(job:FeedbackRecord,run:RabbitRunRecord):FeedbackGithubInput|undefined {
- if(job.route!=='rabbit'||!job.binding||job.id!==run.id||!run.receipt||run.detail?.state!=='completed'||run.request.repository_id!==job.binding.rabbitRepositoryId||run.connectionId!==job.binding.rabbitConnectionId||run.request.base_ref!==job.binding.baseBranch||run.events?.has_more)return;
+ if(job.route!=='rabbit'||!job.binding||job.id!==run.id||!run.receipt||(job.remoteRunId!==undefined&&job.remoteRunId!==run.receipt.run_id)||run.detail?.state!=='completed'||run.request.repository_id!==job.binding.rabbitRepositoryId||run.connectionId!==job.binding.rabbitConnectionId||run.request.base_ref!==job.binding.baseBranch||run.events?.has_more)return;
  const results=(run.events?.items??[]).filter(e=>e.run_id===run.receipt!.run_id&&e.project_id===run.receipt!.project_id&&e.type.startsWith('task.execution.')).map(e=>e.data.result).filter(r=>r?.status==='pr_opened');
  const unique=new Map(results.map(r=>[JSON.stringify([r!.pr_number,r!.head_sha,r!.pr_url]),r!]));if(unique.size!==1)return;const result=[...unique.values()][0]!;
  if(!Number.isSafeInteger(result.pr_number)||!result.pr_number||result.pr_number<1||!sha(result.head_sha)||result.pr_url!==`https://github.com/${FEEDBACK_REPOSITORY}/pull/${result.pr_number}`)return;

@@ -5,7 +5,7 @@ import {useLocalDraft} from './draft-storage';
 const React: typeof ReactTypes = window.React;
 const {Button, Dialog, TextInput, TextArea} = window.VDS;
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const statuses = {queued:'접수됨 · 실행 대기',running:'작업 중',validating:'검증 중',merged:'병합 확인됨',failed:'실패 · 확인 필요',blocked:'진행 조건 확인 필요',unknown:'실행 결과 확인 필요'} as const;
+const statuses = {queued:'접수됨 · 실행 대기',running:'작업 중',validating:'검증 중',ready_for_review:'수정·검증 완료 · PR 검토 대기',merged:'병합 확인됨',failed:'실패 · 확인 필요',blocked:'진행 조건 확인 필요',unknown:'실행 결과 확인 필요'} as const;
 type Draft = {input: FeedbackInput; pending?: FeedbackInput; lastJobId?: string};
 type Invoke = (method:string, args?:unknown) => Promise<unknown>;
 export type FeedbackGuard = {dirty:boolean; pending:boolean};
@@ -24,7 +24,8 @@ export function feedbackReceipt(value:unknown):FeedbackJob|undefined {
   if(!object(value)||typeof value.id!=='string'||!uuid.test(value.id)||!inputValid({...value,requestId:value.id})||typeof value.status!=='string'||!Object.hasOwn(statuses,value.status)||!Number.isSafeInteger(value.revision)||Number(value.revision)<1||![value.createdAt,value.updatedAt].every(v=>typeof v==='string'&&Number.isFinite(Date.parse(v))))return;
   if(value.route!==undefined&&!['rabbit','local'].includes(String(value.route)))return;
   if(value.canResume!==undefined&&typeof value.canResume!=='boolean')return;
-  for(const key of ['agentId','sessionId','message','prUrl','mergeSha'])if(value[key]!==undefined&&!text(value[key],4000))return;
+  for(const key of ['agentId','sessionId','message','prUrl','mergeSha','headSha','verificationId'])if(value[key]!==undefined&&!text(value[key],4000))return;
+  if(value.status==='ready_for_review'&&(typeof value.headSha!=='string'||!/^[a-f0-9]{40}$/.test(value.headSha)||typeof value.verificationId!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$/.test(value.verificationId)||typeof value.prUrl!=='string'||!/^https:\/\/github\.com\/venditjason\/grok-bot-0\.18-reconstructed\/pull\/[1-9]\d*$/.test(value.prUrl)||value.mergeSha!==undefined))return;
   if(value.status==='merged' && (typeof value.mergeSha!=='string'||!/^[0-9a-f]{40}$/i.test(value.mergeSha)||typeof value.prUrl!=='string'||!/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(value.prUrl)))return;
   return value as unknown as FeedbackJob;
 }

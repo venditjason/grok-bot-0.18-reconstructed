@@ -255,3 +255,13 @@ test('collaboration receipts remain intermediate and final model reports stay bo
     }
   }
 });
+
+test('native validation receipt is bounded and bound to exact published base/head while old results remain readable',()=>{
+ const verification={version:1,status:'passed',verification_id:'verify-1',check_run_id:'check-1',review_id:'review-1',binding_sha256:'d'.repeat(64),candidate_sha256:'e'.repeat(64),repository_id:other,base_ref:'main',base_sha:'a'.repeat(40),head_sha:'c'.repeat(40),validation_policy_sha256:'f'.repeat(64),command_manifest_sha256:'0'.repeat(64),tests:true,diff_reviewed:true,process_exit_confirmed:true};
+ const result={status:'pr_opened',base_sha:'a'.repeat(40),head_sha:'c'.repeat(40),summary:{exit_code:0,output_bytes:0,output_sha256:'b'.repeat(64),tests:'unverified'},branch:'rabbit/run/test',pr_url:'https://github.com/example/repository/pull/23',pr_number:23,verification};
+ const parse=r=>schema.normalizeRabbitEventPage({items:[event(1,{type:'task.execution.pr_opened',data:{result:r}})],next_cursor:cursor(run,1),has_more:false,run_revision:2},{projectId:project,runId:run}).items[0].data.result;
+ assert.deepEqual(parse({...result,verification:{...verification,raw_logs:key}}).verification,verification);
+ const old={...result};delete old.verification;assert.equal(parse(old).verification,undefined);
+ for(const patch of [{head_sha:'f'.repeat(40)},{base_sha:'f'.repeat(40)},{tests:false},{process_exit_confirmed:false},{review_id:''},{check_run_id:'a'.repeat(201)},{repository_id:'not-uuid'},{binding_sha256:'invalid'}])assert.throws(()=>parse({...result,verification:{...verification,...patch}}));
+ assert.throws(()=>parse({...result,summary:{...result.summary,exit_code:1}}));
+});

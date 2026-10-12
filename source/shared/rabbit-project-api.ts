@@ -10,7 +10,8 @@ export type RabbitRepositoryPage = {items: RabbitRepository[]; next_cursor: stri
 export type RabbitConnectionTest = {projectId: string; repositories: RabbitRepository[]; pages: number; checkedAt: string};
 export type RabbitRunReceipt = {run_id: string; project_id: string; state: string; created_at: string; poll_url: string; events_url: string};
 export type RabbitRunDetail = {run_id: string; project_id: string; state: string; objective: string; block_reason: string | null; manifest_ready: boolean; created_at: string; run_revision: number; event_cursor: string; last_event_id: string | null; max_parallel_tasks: number; timeout_seconds: number; environment: string};
-export type RabbitExecutionResult = {status: 'pr_opened' | 'no_changes' | 'failed' | 'plan_ready' | 'artifact_saved'; base_sha: string; summary: {exit_code: number; output_bytes: number; output_sha256: string; tests: 'unverified'; report?: {text: string; truncated: boolean}}; branch?: string; pr_url?: string; pr_number?: number; head_sha?: string};
+export type RabbitPublishedVerification = {version:1;status:'passed';verification_id:string;check_run_id:string;review_id:string;binding_sha256:string;candidate_sha256:string;repository_id:string;base_ref:string;base_sha:string;head_sha:string;validation_policy_sha256:string;command_manifest_sha256:string;tests:true;diff_reviewed:true;process_exit_confirmed:true};
+export type RabbitExecutionResult = {status: 'pr_opened' | 'no_changes' | 'failed' | 'plan_ready' | 'artifact_saved'; base_sha: string; summary: {exit_code: number; output_bytes: number; output_sha256: string; tests: 'unverified'; report?: {text: string; truncated: boolean}}; branch?: string; pr_url?: string; pr_number?: number; head_sha?: string; verification?: RabbitPublishedVerification};
 export type RabbitEventData = {message?: string; status?: string; reason?: string; task_id?: string | null; attempt_id?: string | null; result?: RabbitExecutionResult | null};
 export type RabbitRunEvent = {id: string; sequence: number; project_id: string; run_id: string; type: string; data: RabbitEventData; created_at: string};
 export type RabbitEventPage = {items: RabbitRunEvent[]; next_cursor: string; has_more: boolean; run_revision: number};
@@ -131,6 +132,13 @@ function executionResult(value: unknown): RabbitExecutionResult | null {
     const pr_number = integer(input.pr_number, 1, Number.MAX_SAFE_INTEGER), pr_url = text(input.pr_url, 4096), branch = text(input.branch, 187), head_sha = text(input.head_sha, 40);
     if (!/^https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/.test(pr_url) || !pr_url.endsWith(`/pull/${pr_number}`) || !/^rabbit\/[A-Za-z0-9/_-]{1,180}$/.test(branch) || !/^[a-f0-9]{40}$/.test(head_sha)) throw new Error('Rabbit PR 결과 형식을 확인하세요.');
     Object.assign(result, {pr_number, pr_url, branch, head_sha});
+  }
+  if (input.verification !== undefined) {
+    const v=record(input.verification);
+    if(result.status!=='pr_opened'||result.summary.exit_code!==0||v.version!==1||v.status!=='passed'||v.tests!==true||v.diff_reviewed!==true||v.process_exit_confirmed!==true||v.base_sha!==result.base_sha||v.head_sha!==result.head_sha)throw new Error('Rabbit 검증 증빙이 작업 결과와 다릅니다.');
+    const hash=(key:string)=>{const x=text(v[key],64);if(!/^[a-f0-9]{64}$/.test(x))throw new Error('Rabbit 검증 해시 형식을 확인하세요.');return x;};
+    const identifier=(key:string)=>{const x=text(v[key],200);if(!/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$/.test(x))throw new Error('Rabbit 검사 기록 ID를 확인하세요.');return x;};
+    result.verification={version:1,status:'passed',verification_id:identifier('verification_id'),check_run_id:identifier('check_run_id'),review_id:identifier('review_id'),binding_sha256:hash('binding_sha256'),candidate_sha256:hash('candidate_sha256'),repository_id:rabbitUuid(v.repository_id),base_ref:ref(v.base_ref),base_sha:result.base_sha,head_sha:result.head_sha!,validation_policy_sha256:hash('validation_policy_sha256'),command_manifest_sha256:hash('command_manifest_sha256'),tests:true,diff_reviewed:true,process_exit_confirmed:true};
   }
   return result;
 }

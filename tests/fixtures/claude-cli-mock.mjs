@@ -22,6 +22,11 @@ if(process.argv[2]==='auth') {
    const checks=[config.mcpServers.venditbot.type==='http',config.mcpServers.venditbot.headers.Authorization==='Bearer ${VENDITBOT_MCP_TOKEN}',process.env.VENDITBOT_MCP_TOKEN?.length>=32,!process.argv.join(' ').includes(process.env.VENDITBOT_MCP_TOKEN),process.argv[process.argv.indexOf('--tools')+1]==='',process.argv[process.argv.indexOf('--allowedTools')+1]==='mcp__venditbot__*',process.env.ENABLE_CLAUDEAI_MCP_SERVERS==='false'];
    if(checks.some(value=>!value)){send({type:'result',subtype:'error_during_execution',session_id:'owned-claude-session'});return;}
   }
+  if(input.startsWith('web-')){
+   send({type:'assistant',message:{content:[{type:'tool_use',name:'WebSearch',id:'web-1',input:{query:'weather Seoul'}}]}});
+   if(input==='web-hang'){setInterval(()=>{},1000);return;}
+   send({type:'user',message:{content:[{type:'tool_result',tool_use_id:'web-1',is_error:input==='web-fail',content:'Synthetic native result'}]}});
+  }
   if(input==='malformed'){process.stdout.write('not json\n');return;}
   send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Claude '}}});
   if(input==='hang'){setInterval(()=>{},1000);return;}

@@ -51,6 +51,12 @@ createInterface({ input: process.stdin }).on('line', line => {
       if (mode === 'crash') { process.exit(3); break; }
       notify('item/agentMessage/delta', { threadId, turnId, delta: 'Hello ' });
       if (mode === 'hanging' || mode === 'stuck-interrupt') break;
+      if (mode.startsWith('web-')) {
+        const item={type:'webSearch',id:'web-1',query:'weather Seoul',action:{type:'search',query:'weather Seoul',queries:null},results:[{url:'https://www.met.no/'}]};
+        notify('item/started',{threadId,turnId,item});
+        if(mode==='web-hang')break;
+        notify('item/completed',{threadId,turnId,item});complete(threadId,turnId);break;
+      }
       if (mode === 'tools') {
         const params = { threadId, turnId, callId: 'call-1', tool: 'safe_tool', arguments: { value: 4 }, namespace: null };
         send({ id: 900, method: 'item/tool/call', params }); send({ id: 901, method: 'item/tool/call', params });

@@ -46,6 +46,7 @@ function officialExecutor(provider: "codex" | "claude-code", messages: readonly 
         : runClaudeTurn({ ...common, ...(options.sessionId ? { sessionId: options.sessionId } : {}) });
       for await (const event of stream) {
         if (event.type === "text-delta") { yield { type: "text-delta" as const, textDelta: event.delta }; continue; }
+        if (event.type !== "done") continue;
         done = true;
         const input = event.usage.inputTokens ?? 0, output = event.usage.outputTokens ?? 0;
         usage.resolve({ promptTokens: input, completionTokens: output, totalTokens: input + output });

@@ -209,3 +209,24 @@ test('Codex current and completed user images use native inline image channels w
  for await(const _ of runtime.runCodexTurn({messages:[{role:'user',content:[{type:'text',text:'previous image'},{type:'image',image}]},{role:'assistant',content:'prior answer'},{role:'user',content:[{type:'text',text:'current image'},{type:'image',image}]}]})){}
  const sent=await requests();assert.equal(sent.find(r=>r.method==='turn/start').params.input[1].url,image);assert.equal(sent.find(r=>r.method==='thread/inject_items').params.items[0].content[1].image_url,image);assert.equal(sent.find(r=>r.method==='thread/start').params.sandbox,'read-only');assert.equal(sent.find(r=>r.method==='thread/start').params.config.features.shell_tool,false);
 });
+
+
+test('native Codex search is off by default, narrow opt-in keeps shell/files off and exposes bound tool events',async t=>{
+ const {runtime,requests}=await setup(t,'web-success');await login(runtime);const events=[];
+ for await(const event of runtime.runCodexTurn({messages:[{role:'user',content:'search weather'}],nativeWebSearch:true}))events.push(event);
+ const thread=(await requests()).find(x=>x.method==='thread/start').params;
+ assert.equal(thread.config.web_search,'live');assert.equal(thread.sandbox,'read-only');assert.equal(thread.approvalPolicy,'never');
+ assert.deepEqual(thread.config.features,{apps:false,shell_tool:false,unified_exec:false,apply_patch_freeform:false,multi_agent:false});
+ assert.deepEqual(events.filter(x=>x.type==='native-web-search').map(x=>x.status),['running','completed']);
+ assert.equal(events.find(x=>x.type==='native-web-search').input.query,'weather Seoul');
+});
+test('unapproved Codex search event fails instead of claiming a search completed',async t=>{
+ const {runtime,requests}=await setup(t,'web-success');await login(runtime);const events=[];
+ await assert.rejects(async()=>{for await(const event of runtime.runCodexTurn({messages:[{role:'user',content:'test'}]}))events.push(event);},/승인되지/);
+ assert.equal((await requests()).find(x=>x.method==='thread/start').params.config.web_search,'disabled');assert.equal(events.some(x=>x.type==='done'),false);
+});
+test('native Codex search cancellation sends interrupt and never emits completed search',async t=>{
+ const {runtime,requests}=await setup(t,'web-hang');await login(runtime);const controller=new AbortController(),events=[];
+ await assert.rejects(async()=>{for await(const event of runtime.runCodexTurn({messages:[{role:'user',content:'search'}],nativeWebSearch:true,signal:controller.signal})){events.push(event);if(event.type==='native-web-search')controller.abort();}},{name:'AbortError'});
+ assert.equal(events.some(x=>x.type==='native-web-search'&&x.status==='completed'),false);assert.ok((await requests()).some(x=>x.method==='turn/interrupt'));
+});

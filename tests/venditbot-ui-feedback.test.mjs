@@ -81,3 +81,11 @@ test('explicit pre-dispatch resume keeps the original request and preserves a ne
 test('unknown prior dispatch exposes no execute-again control',async t=>{
   const f=fixture(t,{saved:{input:{...input,title:'',description:''},lastJobId:requestId},handler:async()=>snapshot([job(input,{status:'unknown',canResume:false})])});await f.open();assert.equal(button('실행 준비 다시 확인'),undefined);assert.ok(button('상태 새로고침'));assert.equal(f.calls.some(c=>c.method==='submitFeedback'),false);
 });
+
+test('tested draft shows PR review pending, preserves draft input and never claims merge',async t=>{
+ const tested=job(input,{status:'ready_for_review',dispatch:'settled',headSha:'a'.repeat(40),verificationId:'verify-1',prUrl:'https://github.com/venditjason/grok-bot-0.18-reconstructed/pull/12'});
+ const pending={requestId:'c2d61e04-e25b-4d7e-894d-7fd8bf6c5440',kind:'request',title:'새 초안',description:'보존할 내용'};
+ const f=fixture(t,{saved:{input:pending,lastJobId:input.requestId},handler:async()=>snapshot([tested])});await f.open();
+ assert.match(document.body.textContent,/수정·검증 완료 · PR 검토 대기/);assert.doesNotMatch(document.body.textContent,/병합 확인됨/);assert.equal(document.querySelector('[aria-label="리포트 제목"]').value,pending.title);assert.equal(f.calls.filter(c=>c.method==='submitFeedback').length,0);
+ for(const patch of [{headSha:undefined},{verificationId:undefined},{prUrl:'https://github.com/other/repo/pull/12'},{mergeSha:'b'.repeat(40)}])assert.equal(feedbackReceipt({...tested,...patch}),undefined);
+});

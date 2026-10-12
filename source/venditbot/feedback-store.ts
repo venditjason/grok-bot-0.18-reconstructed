@@ -23,9 +23,10 @@ export function readFeedbackPrivate(file:string):string|undefined {
 function normalizeRecord(value:unknown):FeedbackRecord {
  if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('리포트 저장 형식이 올바르지 않습니다.');
  const x=value as FeedbackRecord;feedbackInput({requestId:x.id,kind:x.kind,title:x.title,description:x.description});if(x.binding)validateFeedbackBinding(x.binding);
- if(!['queued','running','validating','merged','failed','blocked','unknown'].includes(x.status)||!['not_started','remote_submitting','remote_accepted','local_dispatching','local_started','settled'].includes(x.dispatch)||!Number.isSafeInteger(x.revision)||x.revision<1||![x.createdAt,x.updatedAt].every(d=>typeof d==='string'&&Number.isFinite(Date.parse(d))))throw new Error('리포트 실행 기록이 올바르지 않습니다.');
+ if(!['queued','running','validating','ready_for_review','merged','failed','blocked','unknown'].includes(x.status)||!['not_started','remote_submitting','remote_accepted','local_dispatching','local_started','settled'].includes(x.dispatch)||!Number.isSafeInteger(x.revision)||x.revision<1||![x.createdAt,x.updatedAt].every(d=>typeof d==='string'&&Number.isFinite(Date.parse(d))))throw new Error('리포트 실행 기록이 올바르지 않습니다.');
  if(x.route!==undefined&&!['rabbit','local'].includes(x.route))throw new Error('리포트 실행 경로를 확인하세요.');
  for(const k of ['agentId','sessionId','remoteRunId','message'] as const)if(x[k]!==undefined&&(typeof x[k]!=='string'||!x[k]||x[k]!.length>(k==='message'?2000:100)||x[k]!.includes('\0')))throw new Error('리포트 상태 기록을 확인하세요.');
+ if(x.status==='ready_for_review'&&(!x.headSha||!/^[a-f0-9]{40}$/.test(x.headSha)||!x.verificationId||!/^[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,199}$/.test(x.verificationId)||!x.prUrl||!/^https:\/\/github\.com\/venditjason\/grok-bot-0\.18-reconstructed\/pull\/[1-9]\d*$/.test(x.prUrl)||x.mergeSha!==undefined))throw new Error('검증된 PR 검토 증빙이 없습니다.');
  if(x.status==='merged'&&(!x.mergeSha||!/^[a-f0-9]{40}$/i.test(x.mergeSha)||!x.prUrl||!/^https:\/\/github\.com\/venditjason\/grok-bot-0\.18-reconstructed\/pull\/[1-9]\d*$/.test(x.prUrl)))throw new Error('검증된 병합 증빙이 없습니다.');
  return structuredClone(x);
 }

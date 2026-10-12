@@ -1,3 +1,5 @@
+import {WebTools,WEB_TOOL_POLICY,wantsNativeWebSearch,nativeWebInstructions} from './web-tools.js';
+import type {NativeWebSearchEvent} from '../shared/node/native-web-events.js';
 import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell, dialog, nativeImage } from 'electron';
 import { existsSync, readFileSync, writeFileSync, lstatSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -11,6 +13,7 @@ import { streamApiProvider, validateApiProviderConnection } from '../host/extens
 import { configureProviderAuthRuntime, beginProviderLogin, getProviderAuthStatus, cancelProviderLogin, disconnectProvider, testProviderConnection, shutdownProviderAuthRuntime, shutdownProviderAuthRuntimeForUpdate, runCodexTurn, runClaudeTurn, listProviderModels, type LoginProvider } from '../shared/node/provider-auth-runtime.js';
 import {FeedbackTools, FEEDBACK_TOOL_POLICY, explicitAppFeedbackRequest} from './feedback-tools.js';
 import {FeedbackMainAdapter} from './feedback-main-adapter.js';
+import {readFeedbackDraftProof} from './feedback-draft-proof.js';
 import {feedbackGithubInput, feedbackGithubProofResponse} from './feedback-github-proof.js';
 import type {FeedbackBinding} from '../shared/feedback.js';
 import {ChatAttachmentStore} from './chat-attachments.js';
@@ -135,6 +138,12 @@ const feedbackProofControllers = new Set<AbortController>();
 const feedback = new FeedbackMainAdapter({root: paths.profileRoot, agents, sessions, rabbit, rabbitStore,
   defaultRoute: () => agents.list().flatMap(agent => connectionRoutes(agent))[0] ?? settings.getApiProviderProfiles().map(p => ({connectionId:p.id,model:p.model}))[0],
   assertMutable: () => {if (quitting || quitPending || updatePending || credentialMutation) throw new Error('종료·업데이트·보안 저장 중에는 리포트 실행을 시작할 수 없습니다.');},
+  verifyRabbitDraft: async (job, run) => {
+    const controller=new AbortController();feedbackProofControllers.add(controller);
+    const timer=setTimeout(()=>controller.abort(),45_000);timer.unref();
+    try{return await readFeedbackDraftProof(fetch,job,run,controller.signal);}
+    finally{clearTimeout(timer);controller.abort();feedbackProofControllers.delete(controller);}
+  },
   verifyRabbitMerge: async (job, run) => {
     const input = feedbackGithubInput(job, run); if (!input) return;
     const controller = new AbortController(); feedbackProofControllers.add(controller);
@@ -543,7 +552,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
   };
   const boundRecords = session.development ? rabbitStore.listRuns().filter(record => record.connectionId === session.development!.connectionId && record.source && (record.source.sessionId === sessionId || !!session.teamRunId && record.source.teamRunId === session.teamRunId && record.source.agentId === session.agentId)).map(record => ({id: record.id, phase: record.phase, state: record.detail?.state})).slice(0,100) : [];
   const projectInstructions = session.agentId && session.purpose !== 'avatar' ? (session.development ? `${developmentInstructions(session.development)}\n기존 원격 실행 기록(새 요청으로 반복하지 마세요): ${JSON.stringify(boundRecords)}` : rabbit.instructions(projectTaskText(), projectSource)) : '';
-  let systemInstructions = [session.instructions, session.agentId && session.purpose !== 'avatar' ? FEEDBACK_TOOL_POLICY : '', session.workspacePath && session.purpose !== 'avatar' ? WORKSPACE_DEVELOPMENT_POLICY : '', projectInstructions].filter(Boolean).join('\n\n');
+  let systemInstructions = [session.instructions, session.purpose !== 'avatar' ? WEB_TOOL_POLICY : '', session.agentId && session.purpose !== 'avatar' ? FEEDBACK_TOOL_POLICY : '', session.workspacePath && session.purpose !== 'avatar' ? WORKSPACE_DEVELOPMENT_POLICY : '', projectInstructions].filter(Boolean).join('\n\n');
   const authorizeWorkspace = async (request: ActionApprovalRequest) => {
     if (request.operation === 'write') {assertDevelopmentWriteAllowed(session.development); rabbit.assertLocalWrite(projectTaskText(), projectSource);}
     const allowed = await authorize(request);
@@ -595,17 +604,34 @@ async function run(sessionId: string, text: string, controller: AbortController)
       reason: '벤디트봇 자체 버그·개선 요청을 기존 리포트 개발 경로에 저장합니다. 저장은 개발 완료가 아닙니다.',
     }, controller.signal, sessionId, !explicitAppFeedbackRequest(projectTaskText())),
   }, sessionId, answer.id, controller.signal) : undefined;
+  const webTools = session.purpose !== 'avatar' ? new WebTools((tool, args) => authorize({path: '.', operation: 'read', tool, category: 'routine',
+    ...(sensitiveWorkspaceContent(JSON.stringify(args)) ? {categories: ['sensitive_disclosure'], preview: '[민감정보 형태 감지 — 미리보기 숨김]'} : {preview: JSON.stringify(args)}),
+    reason: '공개 웹 제공자에 주소 또는 날씨 좌표를 보내고 조회 결과를 현재 AI 연결에 제공합니다.',
+  }), controller.signal) : undefined;
+  const nativeToolEvent = (provider:string,event:NativeWebSearchEvent) => {
+    if(finalized || controller.signal.aborted)return;
+    const callId=`native-web:${provider}:${event.callId}`;
+    answer.tools ??= [];let record=answer.tools.find(t=>t.callId===callId);
+    if(record && record.status !== 'running')return;
+    const input=sensitiveWorkspaceContent(JSON.stringify(event.input))?{redacted:true}:event.input;
+    if(!record){record={callId,name:'native_web_search',status:'running',input};answer.tools.push(record);}
+    record.input=input;record.status=event.status;
+    record.summary=event.status==='running'?'공식 웹 검색 중':event.status==='completed'?'공식 웹 검색 단계가 끝났습니다.':'공식 웹 검색에 실패했습니다.';
+    if(event.output!==undefined)record.output=structuredClone(event.output);
+    persist();emit({type:'tool-status',sessionId,messageId:answer.id,...record});
+  };
   const agentTools = currentAgent ? new AgentManagementTools({agentId: currentAgent.id, expectedUpdatedAt: currentAgent.updatedAt, renameAgent: renameSavedAgent, signal: controller.signal}) : undefined;
   const execute = async (definition: {name?: unknown}, args: unknown, callId: string): Promise<unknown> => {
     if (finalized || controller.signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
     if (typeof definition.name !== 'string') throw new Error('도구 이름을 확인하세요.');
+    const isWebTool = webTools?.definitions.some(tool => tool.name === definition.name);
     const isFeedbackTool = appFeedbackTools?.definitions.some(tool => tool.name === definition.name);
     const isTeamTool = teamTools?.definitions.some(tool => tool.name === definition.name);
     const isAgentTool = agentTools?.definitions.some(tool => tool.name === definition.name);
     const isProjectTool = projectTools?.definitions.some(tool => tool.name === definition.name);
     const isRoutineTool = routineTools?.definitions.some(tool => tool.name === definition.name);
     const isConnectorTool = connectorTools?.definitions.some(tool => tool.name === definition.name);
-    if (!isFeedbackTool && !isTeamTool && !isAgentTool && !isProjectTool && !isRoutineTool && !isConnectorTool && !executor) throw new Error('작업 폴더를 선택한 대화에서만 파일 도구를 사용할 수 있습니다.');
+    if (!isWebTool && !isFeedbackTool && !isTeamTool && !isAgentTool && !isProjectTool && !isRoutineTool && !isConnectorTool && !executor) throw new Error('작업 폴더를 선택한 대화에서만 파일 도구를 사용할 수 있습니다.');
     const raw = args && typeof args === 'object' ? args as Record<string, unknown> : {};
     answer.tools ??= []; const prior = answer.tools.find(t => t.callId === callId);
     const record: ToolRecord = prior ?? {callId, name: definition.name, ...(typeof raw.path === 'string' ? {path: raw.path} : {}), status: 'running', input: structuredClone(raw)};
@@ -614,9 +640,9 @@ async function run(sessionId: string, text: string, controller: AbortController)
     try {
       if ((isTeamTool || isAgentTool) && !await authorize({path: '.', operation: 'manage', tool: definition.name, category: 'routine', reason: '현재 에이전트 또는 팀 범위의 작업 도구입니다.'})) throw new Error('사용자가 이 작업을 승인하지 않았습니다.');
       if (finalized || controller.signal.aborted) throw new DOMException('작업을 중단했습니다.', 'AbortError');
-      const result = isFeedbackTool ? await appFeedbackTools!.execute(definition.name, args, callId) : isConnectorTool ? await connectorTools!.execute(definition.name, args, callId) : isRoutineTool ? await routineTools!.execute(definition.name, args, callId) : isTeamTool ? await teamTools!.execute(definition.name, args, callId) : isAgentTool ? await agentTools!.execute(definition.name, args, callId) : isProjectTool ? await projectTools!.execute(definition.name, args, callId) : await executor!.execute(definition.name, args, callId);
+      const result = isWebTool ? await webTools!.execute(definition.name, args, callId) : isFeedbackTool ? await appFeedbackTools!.execute(definition.name, args, callId) : isConnectorTool ? await connectorTools!.execute(definition.name, args, callId) : isRoutineTool ? await routineTools!.execute(definition.name, args, callId) : isTeamTool ? await teamTools!.execute(definition.name, args, callId) : isAgentTool ? await agentTools!.execute(definition.name, args, callId) : isProjectTool ? await projectTools!.execute(definition.name, args, callId) : await executor!.execute(definition.name, args, callId);
       record.output = structuredClone(result);
-      record.status = 'completed'; record.summary = definition.name === 'write_file' ? ((result as {written?: boolean}).written ? '파일을 저장했습니다.' : '파일 수정을 거절했습니다.') : '완료';
+      record.status = 'completed'; record.summary = definition.name === 'get_weather' ? 'MET Norway 예보 · CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/) · 일부 항목 발췌' : definition.name === 'write_file' ? ((result as {written?: boolean}).written ? '파일을 저장했습니다.' : '파일 수정을 거절했습니다.') : '완료';
       return result;
     } catch (error) { record.status = 'failed'; record.summary = safeError(error); record.output = {error: record.summary}; throw error; }
     finally { if (!finalized && activeRun?.controller === controller) { persist(); emit({type: 'tool-status', sessionId, messageId: answer.id, ...record}); emit({type: 'session', session}); } }
@@ -652,8 +678,9 @@ async function run(sessionId: string, text: string, controller: AbortController)
     }
     if(JSON.stringify(history).length>24*1024*1024)throw Error('첨부 문맥이 너무 큽니다. 새 대화에서 필요한 파일만 첨부해 주세요.');
     if (session.workspacePath) executor = new WorkspaceExecutor(session.workspacePath, approve, controller.signal, authorizeWorkspace);
-    const tools = [...(appFeedbackTools?.definitions ?? []), ...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
+    const tools = [...(webTools?.definitions ?? []), ...(appFeedbackTools?.definitions ?? []), ...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
     const routes = connectionRoutes(session);
+    let nativeWebPermission:boolean|undefined;
     for (const [index, route] of routes.entries()) {
       if (controller.signal.aborted) throw new DOMException('중단했습니다.', 'AbortError');
       const attempt: ConnectionAttempt = {...route, status: 'running'};
@@ -669,9 +696,20 @@ async function run(sessionId: string, text: string, controller: AbortController)
         toolInvoked = true; return execute(definition, args, callId);
       };
       try {
+        const nativeProvider=route.connectionId==='codex'||route.connectionId==='claude-code';
+        let nativeWebSearch=false;
+        if(nativeProvider && session.purpose!=='avatar' && wantsNativeWebSearch(projectTaskText())){
+          nativeWebPermission ??= await authorize({path:'.',operation:'read',tool:'native_web_search',category:'routine',
+            ...(sensitiveWorkspaceContent(JSON.stringify(history))?{categories:['sensitive_disclosure']}:{}),
+            reason:'이번 응답에서 공식 CLI의 웹 검색만 허용합니다. 검색 질의가 공급자에 전달되며 앱은 검색 실행과 결과 수신을 기록합니다. 파일·셸 권한은 추가하지 않습니다.',preview:sensitiveWorkspaceContent(projectTaskText())?'[민감정보 형태 감지 — 미리보기 숨김]':projectTaskText().slice(0,2000)});
+          nativeWebSearch=nativeWebPermission;
+          if(controller.signal.aborted)throw new DOMException('중단했습니다.','AbortError');
+        }
+        const routeInstructions=[systemInstructions,nativeWebInstructions(nativeWebSearch)].filter(Boolean).join('\n\n');
         if (route.connectionId === 'codex') {
-          for await (const event of runCodexTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), ...(systemInstructions ? {systemInstructions} : {}), tools, executeTool: executeAttempt, signal: attemptController.signal })) {
+          for await (const event of runCodexTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), systemInstructions:routeInstructions, nativeWebSearch, tools, executeTool: executeAttempt, signal: attemptController.signal })) {
             if (event.type === 'text-delta') addText(event.delta);
+            if (event.type === 'native-web-search') {toolInvoked=true;nativeToolEvent(route.connectionId,event);}
             if (event.type === 'done') { completed = true; if (!answer.text) addText(event.text); local(() => settings.recordInferenceUsage('codex', event.usage)); }
           }
         } else if (route.connectionId === 'claude-code') {
@@ -684,8 +722,9 @@ async function run(sessionId: string, text: string, controller: AbortController)
             try { mcp = await startMcpGateway((name, args, id) => executeAttempt({name}, args, id), attemptController.signal, tools); }
             catch (error) { localFailure = true; throw error; }
           }
-          for await (const event of runClaudeTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), ...(systemInstructions ? {systemInstructions} : {}), ...(previous ? {sessionId: previous} : {}), ...(!previous && (routes.length > 1 || efficiency || session.messages.some(message => message.routeSelection?.efficiency)) ? {historyHandoff: true} : {}), ...(mcp ? {mcpServer: {url: mcp.url, token: mcp.token}} : {}), signal: attemptController.signal })) {
+          for await (const event of runClaudeTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), systemInstructions:routeInstructions, nativeWebSearch, ...(previous ? {sessionId: previous} : {}), ...(!previous && (routes.length > 1 || efficiency || session.messages.some(message => message.routeSelection?.efficiency)) ? {historyHandoff: true} : {}), ...(mcp ? {mcpServer: {url: mcp.url, token: mcp.token}} : {}), signal: attemptController.signal })) {
             if (event.type === 'text-delta') addText(event.delta);
+            if (event.type === 'native-web-search') {toolInvoked=true;nativeToolEvent(route.connectionId,event);}
             if (event.type === 'done') { completed = true; if (!answer.text) addText(event.text); nextProviderSessionId = event.sessionId; local(() => settings.recordInferenceUsage('claude-code', event.usage)); }
           }
         } else {
@@ -696,7 +735,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
           try { key = await secrets.read(apiProfileSecretKey(selected), attemptController.signal); }
           catch (error) { localFailure = true; throw error; }
           if (!key) throw new Error('API 키를 먼저 등록하세요.');
-          for await (const event of streamApiProvider({ profile: {...selected, model: route.model}, apiKey: key, messages: history, ...(session.purpose === 'avatar' ? {maxOutputTokens: 16384} : {}), ...(selected.capabilities.tools ? {tools, executeTool: executeAttempt} : {}), signal: attemptController.signal, system: '당신은 벤디트봇입니다. 제공된 파일 도구로 선택한 작업 폴더에서 작업할 수 있습니다. 파일 수정에는 사용자 승인이 필요합니다.' + (systemInstructions ? `\n\n에이전트 역할 지시문:\n${systemInstructions}` : '') })) {
+          for await (const event of streamApiProvider({ profile: {...selected, model: route.model}, apiKey: key, messages: history, ...(session.purpose === 'avatar' ? {maxOutputTokens: 16384} : {}), ...(selected.capabilities.tools ? {tools, executeTool: executeAttempt} : {}), signal: attemptController.signal, system: '당신은 벤디트봇입니다. 제공된 파일 도구로 선택한 작업 폴더에서 작업할 수 있습니다. 파일 수정에는 사용자 승인이 필요합니다.' + `\n\n에이전트 역할 지시문:\n${routeInstructions}` })) {
             if (event.type === 'text-delta') addText(event.delta);
             if (event.type === 'completed') { completed = true; verifiedProfiles.add(selected.id); }
             if (event.type === 'usage') local(() => settings.recordInferenceUsage(selected.provider, event.usage));

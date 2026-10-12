@@ -1,3 +1,4 @@
+import {webInput} from "./native-web-events.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
 import { CodexAppServer, codexProtocolError, type CodexServerOptions } from "./codex-app-server.js";
@@ -24,17 +25,20 @@ export interface ProviderAuthStatus {
 export interface ProviderLoginResult extends ProviderAuthStatus { authUrl?: string }
 export interface ProviderMessage { role: string; content: string | readonly unknown[]; [key: string]: unknown }
 export interface ProviderUsage { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
-export type CodexTurnEvent = { type: "text-delta"; delta: string } | { type: "done"; text: string; threadId: string; turnId: string; usage: ProviderUsage };
+export type CodexTurnEvent = { type: "text-delta"; delta: string } | { type: "done"; text: string; threadId: string; turnId: string; usage: ProviderUsage } | import('./native-web-events.js').NativeWebSearchEvent;
 export interface CodexTurnOptions {
   messages: readonly ProviderMessage[];
   model?: string;
   effort?: string;
   systemInstructions?: string;
   signal?: AbortSignal;
+  /** Enabled only after this turn's host action-rule authorization. */
+  nativeWebSearch?: boolean;
   tools?: readonly Loose[];
   executeTool?: (tool: Loose, args: unknown, toolCallId: string) => Promise<unknown>;
 }
 export interface ClaudeTurnOptions {
+  nativeWebSearch?: boolean;
   messages: readonly ProviderMessage[]; model?: string; effort?: string; systemInstructions?: string; signal?: AbortSignal; sessionId?: string; mcpServer?: ClaudeMcpServer;
   /** Explicitly pass completed cross-provider history as quoted JSON context on a new Claude session. The host must disclose this transfer. */
   historyHandoff?: boolean;
@@ -400,7 +404,7 @@ export class ProviderAuthRuntime {
       const tools = options.executeTool == null ? [] : (options.tools ?? []).filter(tool => typeof tool.name === "string" && (tool.inputSchema ?? tool.parameters) != null);
       const started = await abortable(server.request("thread/start", {
         model: selected.model, cwd: this.paths().codexHome, approvalPolicy: "never", sandbox: "read-only", ephemeral: true,
-        baseInstructions: `${SYSTEM_PROMPT}${options.systemInstructions ? `\n\nAgent instructions:\n${options.systemInstructions}` : ""}`, config: { web_search: "disabled", features: { apps: false, shell_tool: false, unified_exec: false, apply_patch_freeform: false, multi_agent: false } },
+        baseInstructions: `${SYSTEM_PROMPT}${options.systemInstructions ? `\n\nAgent instructions:\n${options.systemInstructions}` : ""}`, config: { web_search: options.nativeWebSearch === true ? "live" : "disabled", features: { apps: false, shell_tool: false, unified_exec: false, apply_patch_freeform: false, multi_agent: false } },
         ...(tools.length ? { dynamicTools: tools.map(tool => ({ type: "function", name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema ?? tool.parameters })) } : {}),
       }), controller.signal);
       threadId = started.thread?.id;
@@ -433,6 +437,10 @@ export class ProviderAuthRuntime {
           text += params.delta;
           if (Buffer.byteLength(text) > 4 * 1024 * 1024) throw new Error("Codex 응답 크기 제한을 초과했습니다.");
           yield { type: "text-delta", delta: params.delta };
+        } else if ((method === "item/started" || method === "item/completed") && params.item?.type === "webSearch") {
+          if (options.nativeWebSearch !== true) throw new Error("승인되지 않은 공식 웹 검색 이벤트입니다.");
+          if (typeof params.item.id !== "string" || params.item.id.length > 200) throw new Error("공식 웹 검색 이벤트 형식이 올바르지 않습니다.");
+          yield {type: 'native-web-search', callId: params.item.id, status: method === 'item/started' ? 'running' : 'completed', input: webInput(params.item.action ?? {query:params.item.query}), ...(method === 'item/completed' ? {output: {native_step_completed: true, results_received: Array.isArray(params.item.results) && params.item.results.length > 0}} : {})};
         } else if (method === "thread/tokenUsage/updated") {
           // Each VenditBot request owns a fresh thread: total includes all model/tool
           // steps in this turn; last alone would undercount after a tool continuation.
