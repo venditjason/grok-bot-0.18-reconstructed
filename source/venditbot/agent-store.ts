@@ -1,15 +1,16 @@
+import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { atomicWriteJson, validConnections, connectionRouteKey, type ConnectionRoute } from './local-store.js';
 
-export type AgentProfile = { id: string; name: string; instructions: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; workspacePath?: string; avatarId?: string; automation?: {policyId: string}; createdAt: string; updatedAt: string };
+export type AgentProfile = { development?: DevelopmentBinding; id: string; name: string; instructions: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; workspacePath?: string; avatarId?: string; automation?: {policyId: string}; createdAt: string; updatedAt: string };
 const maxAgentFileBytes = 4 * 1024 * 1024;
 function bounded(value: unknown, limit: number, nonempty = false): value is string { return typeof value === 'string' && value.length <= limit && !value.includes('\0') && (!nonempty || !!value.trim()); }
 function valid(value: unknown): value is AgentProfile {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const a = value as AgentProfile;
-  return bounded(a.id, 100, true) && bounded(a.name, 80, true) && bounded(a.instructions, 16000, true) && bounded(a.connectionId, 200, true) && bounded(a.model, 200, true)
+  return (a.development === undefined || validDevelopmentBinding(a.development)) && bounded(a.id, 100, true) && bounded(a.name, 80, true) && bounded(a.instructions, 16000, true) && bounded(a.connectionId, 200, true) && bounded(a.model, 200, true)
     && (a.effort === undefined || bounded(a.effort, 40)) && (a.workspacePath === undefined || bounded(a.workspacePath, 4096, true))
     && (a.avatarId === undefined || (typeof a.avatarId === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(a.avatarId)))
     && (a.automation === undefined || (!!a.automation && typeof a.automation === 'object' && !Array.isArray(a.automation) && Object.keys(a.automation).length === 1 && bounded(a.automation.policyId, 100, true)))

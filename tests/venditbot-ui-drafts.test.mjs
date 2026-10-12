@@ -96,3 +96,21 @@ test('automatic representative drafts preserve project text, request identity an
   assert.deepEqual(new LocalDraftStore(disk, 'team-edits', {}, teamEditDrafts).value.new.draft, draft);
   assert.equal(teamEditDrafts({new: {draft: {...draft, leaderMode: 'forged'}, expectedUpdatedAt: ''}}), undefined);
 });
+
+test('Rabbit project bindings survive agent/team draft reloads and malformed bindings preserve original bytes', () => {
+  const disk = storage(), development = { mode: 'rabbit', connectionId: 'project-api-a' };
+  for (const [name, parser, record] of [['agent-edits', agentEditDrafts, agent], ['team-edits', teamEditDrafts, team]]) {
+    const bound = { ...record, draft: { ...record.draft, development } }, store = new LocalDraftStore(disk, name, {}, parser);
+    store.set({ item: bound }); assert.deepEqual(new LocalDraftStore(disk, name, {}, parser).value.item.draft.development, development);
+    const key = `venditbot.drafts.v1.${name}`, malformed = JSON.stringify({ item: { ...bound, draft: { ...bound.draft, development: { ...development, apiKey: 'must-not-persist-as-binding' } } } }); disk.setItem(key, malformed);
+    const recovered = new LocalDraftStore(disk, name, {}, parser); assert.ok(recovered.error); assert.equal(disk.getItem(key), malformed); assert.equal(recovered.original.text, malformed);
+  }
+});
+
+test('efficiency policy history bounds and chosen routes survive draft reload without altering other task rules', () => {
+  const disk = storage(), efficiency = { preset: 'periodic_report', maxHistoryTurns: 3, maxHistoryCharacters: 12000 };
+  const record = { draft: { name: '보고 절약', description: '', defaultTaskKind: 'standard', rules: ['routine','standard','complex'].map(taskKind => ({ taskKind, keywords: [], connections: [{ connectionId: 'codex', model: 'fixture', effort: 'low' }], ...(taskKind === 'routine' ? { efficiency } : {}) })) }, expectedUpdatedAt: '', previewText: '', previewAgentId: '' };
+  const store = new LocalDraftStore(disk, 'policy-edits', {}, policyEditDrafts); store.set({ new: record }); assert.equal(store.error, undefined);
+  assert.deepEqual(new LocalDraftStore(disk, 'policy-edits', {}, policyEditDrafts).value.new, record);
+  assert.equal(policyEditDrafts({ new: { ...record, draft: { ...record.draft, rules: record.draft.rules.map(rule => ({ ...rule, efficiency: { ...efficiency, maxHistoryTurns: -1 } })) } } }), undefined);
+});

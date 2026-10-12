@@ -2,7 +2,15 @@
 export const TASK_KINDS = ['routine', 'standard', 'complex'] as const;
 export type TaskKind = typeof TASK_KINDS[number];
 export type PolicyConnectionRoute = {connectionId: string; model: string; effort?: string};
-export type AgentPolicyRule = {taskKind: TaskKind; keywords: string[]; connections: PolicyConnectionRoute[]};
+export type EfficiencyPresetId = 'status_check' | 'periodic_report' | 'settings_change';
+/** Bounds previous completed history, not current input, system/tool context or provider tokens. */
+export type PolicyEfficiency = {preset: EfficiencyPresetId; maxHistoryTurns: number; maxHistoryCharacters: number};
+export const EFFICIENCY_PRESETS = [
+  {id: 'status_check', label: '상태 확인', keywords: ['상태 확인', '확인하기', '상태 점검'], maxHistoryTurns: 1, maxHistoryCharacters: 4000},
+  {id: 'periodic_report', label: '정기 보고서', keywords: ['정기 보고서', '보고서쓰기', '보고서 쓰기'], maxHistoryTurns: 3, maxHistoryCharacters: 12000},
+  {id: 'settings_change', label: '설정 변경', keywords: ['설정 변경', '설정바꾸기', '설정 바꾸기'], maxHistoryTurns: 1, maxHistoryCharacters: 6000},
+] as const;
+export type AgentPolicyRule = {taskKind: TaskKind; keywords: string[]; connections: PolicyConnectionRoute[]; efficiency?: PolicyEfficiency};
 export type AgentPolicyDraft = {name: string; description: string; defaultTaskKind: TaskKind; rules: AgentPolicyRule[]};
 export type AgentPolicy = AgentPolicyDraft & {id: string; createdAt: string; updatedAt: string};
 export type AgentPolicySelection = {
@@ -13,6 +21,7 @@ export type AgentPolicySelection = {
   policyName: string;
   policyUpdatedAt: string;
   warning?: string;
+  efficiency?: PolicyEfficiency;
 };
 export const AGENT_POLICY_LIMITS = Object.freeze({name: 80, description: 2000, keywordsPerRule: 32, keyword: 80, routesPerRule: 8});
 const labels: Record<TaskKind, string> = {routine: '단순·반복', standard: '일반', complex: '복잡한 작업'};
@@ -43,6 +52,14 @@ function date(value: unknown): string {
 const matchText = (value: string): string => value.normalize('NFKC').toLowerCase();
 const routeKey = (route: PolicyConnectionRoute): string => JSON.stringify([route.connectionId, route.model, route.effort ?? null]);
 
+export function normalizePolicyEfficiency(value: unknown): PolicyEfficiency {
+  const input = object(value, '절약 설정 형식을 확인하세요.');
+  if (!EFFICIENCY_PRESETS.some(preset => preset.id === input.preset)) throw new Error('절약 작업 종류를 확인하세요.');
+  if (!Number.isInteger(input.maxHistoryTurns) || Number(input.maxHistoryTurns) < 0 || Number(input.maxHistoryTurns) > 12) throw new Error('이전 대화는 0~12회까지 지정하세요.');
+  if (!Number.isInteger(input.maxHistoryCharacters) || Number(input.maxHistoryCharacters) < 1000 || Number(input.maxHistoryCharacters) > 50_000) throw new Error('이전 대화 전송 한도는 1,000~50,000자로 지정하세요.');
+  return {preset: input.preset as EfficiencyPresetId, maxHistoryTurns: Number(input.maxHistoryTurns), maxHistoryCharacters: Number(input.maxHistoryCharacters)};
+}
+
 /** Returns owned objects and refuses duplicate priorities, including malformed IPC input. */
 export function normalizePolicyConnections(value: unknown): PolicyConnectionRoute[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > AGENT_POLICY_LIMITS.routesPerRule) throw new Error('정책 연결은 1개부터 8개까지 지정하세요.');
@@ -68,7 +85,7 @@ export function normalizeAgentPolicyDraft(value: unknown): AgentPolicyDraft {
     if (!Array.isArray(rule.keywords) || rule.keywords.length > AGENT_POLICY_LIMITS.keywordsPerRule) throw new Error('규칙별 키워드는 32개 이내로 지정하세요.');
     const keywords = Array.from(rule.keywords, keyword => bounded(keyword, AGENT_POLICY_LIMITS.keyword, '각 키워드는 1~80자로 입력하세요.').trim());
     if (new Set(keywords.map(matchText)).size !== keywords.length) throw new Error('같은 규칙 안에 중복 키워드를 지정할 수 없습니다.');
-    return {taskKind: kind, keywords, connections: normalizePolicyConnections(rule.connections)};
+    return {taskKind: kind, keywords, connections: normalizePolicyConnections(rule.connections), ...(rule.efficiency === undefined ? {} : {efficiency: normalizePolicyEfficiency(rule.efficiency)})};
   });
   if (new Set(parsed.map(rule => rule.taskKind)).size !== TASK_KINDS.length) throw new Error('세 작업 종류의 규칙을 중복 없이 하나씩 지정하세요.');
   return {name, description, defaultTaskKind, rules: TASK_KINDS.map(kind => parsed.find(rule => rule.taskKind === kind)!)};
@@ -107,6 +124,7 @@ export function validAgentPolicySelection(value: unknown): value is AgentPolicyS
     token(selection.policyId, 100, '정책 ID를 확인하세요.');
     bounded(selection.policyName, AGENT_POLICY_LIMITS.name, '정책 이름을 확인하세요.'); date(selection.policyUpdatedAt);
     if (selection.warning !== undefined) bounded(selection.warning, 1000, '정책 알림을 확인하세요.');
+    if (selection.efficiency !== undefined) normalizePolicyEfficiency(selection.efficiency);
     return true;
   } catch { return false; }
 }

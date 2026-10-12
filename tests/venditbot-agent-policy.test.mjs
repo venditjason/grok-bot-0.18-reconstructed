@@ -155,3 +155,17 @@ test('selection validator refuses incomplete or corrupted persisted decision met
     const input = structuredClone(selected); mutate(input); assert.equal(validAgentPolicySelection(input), false);
   }
 });
+
+test('opt-in efficiency survives normalization and selection while absent settings retain legacy behavior',()=>{
+ const input=policy();input.rules[0].efficiency={preset:'status_check',maxHistoryTurns:1,maxHistoryCharacters:4000};
+ assert.deepEqual(normalizeAgentPolicy(input),input);const result=resolve({policy:input});assert.deepEqual(result.efficiency,input.rules[0].efficiency);assert.equal(validAgentPolicySelection(result),true);
+ result.efficiency.maxHistoryTurns=2;assert.equal(input.rules[0].efficiency.maxHistoryTurns,1);
+ for(const efficiency of [null,{}, {...input.rules[0].efficiency,maxHistoryTurns:99}]){const bad=structuredClone(input);bad.rules[0].efficiency=efficiency;assert.throws(()=>normalizeAgentPolicy(bad));assert.equal(validAgentPolicySelection({...resolve(),efficiency}),false);}
+});
+test('efficiency rules stop on unavailable routes rather than silently restoring original high models',()=>{
+ const input=policy();input.rules[0].efficiency={preset:'periodic_report',maxHistoryTurns:3,maxHistoryCharacters:12000};
+ for(const unavailable of [[],[{connectionId:'codex',models:[model('gpt-6-astra')]}],[{connectionId:'codex',models:[model('gpt-6-luna',['high'])]}]])assert.throws(()=>resolve({policy:input,catalogs:unavailable}),/다른 모델로 자동 전환하지/);
+ assert.deepEqual(resolve({policy:input}).connections,input.rules[0].connections);
+ assert.throws(()=>resolve({policy:input,explicitConnections:[codex]}),/절약 정책에 지정/);
+ assert.deepEqual(resolve({policy:input,explicitConnections:input.rules[0].connections}).connections,input.rules[0].connections);
+});

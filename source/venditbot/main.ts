@@ -31,9 +31,12 @@ import {ActionRulesStore} from './action-rules-store.js';
 import {RabbitStore} from './rabbit-store.js';
 import {RabbitHost} from './rabbit-host.js';
 import {RabbitTools} from './rabbit-tools.js';
+import {normalizeRabbitConnectionDraft} from '../shared/rabbit-project-api.js';
 import {evaluateActionRules} from '../shared/action-rules.js';
 import {resolveAgentPolicy} from './agent-policy-resolver.js';
-import {normalizeAgentPolicyDraft, type AgentPolicy, type AgentPolicySelection, type TaskKind} from '../shared/agent-policy.js';
+import {validDevelopmentBinding, assertDevelopmentWriteAllowed, developmentInstructions, type DevelopmentBinding} from '../shared/development-routing.js';
+import {boundPolicyHistory, efficiencyInstructions, policyEfficiencyPreset} from './policy-efficiency.js';
+import {normalizeAgentPolicyDraft, normalizePolicyConnections, type AgentPolicy, type AgentPolicySelection, type TaskKind} from '../shared/agent-policy.js';
 
 const metadata = JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8')) as {venditbotDevelopment?: boolean; version?: string};
 const productVersion = typeof metadata.version === 'string' ? metadata.version : '0.2.0';
@@ -125,6 +128,7 @@ teams = new TeamCoordinator(teamStore, {
       const member = run.memberSnapshots.find(a => a.id === step.agentId)!, connections = structuredClone(step.connections ?? connectionRoutes(member)), first = connections[0]!;
       const policy = run.policySnapshots?.find(p => p.agentId === member.id)?.policy;
       return [{id: step.sessionId, title: `${run.teamName} · ${member.name} · ${step.kind === 'summary' ? '최종 종합' : step.kind === 'plan' ? `${step.round}차 계획` : '위임 작업'}`.slice(0, 200), ...first, connections,
+        ...(run.development ? {development: structuredClone(run.development)} : {}),
         agentId: member.id, agentName: member.name, instructions: member.instructions, ...(member.workspacePath ? {workspacePath: member.workspacePath} : {}), teamRunId: run.id, teamStepIndex: index,
         ...(step.routeSelection ? {routeSelection: step.routeSelection} : policy && !step.connections ? {policySnapshot: policy, policyAllowedConnections: connectionRoutes(member), policyTaskText: run.goal} : {}),
         createdAt: run.createdAt, updatedAt: run.createdAt, messages: []}];
@@ -143,6 +147,7 @@ teams = new TeamCoordinator(teamStore, {
 const automaticTeams = new AutomaticTeamCreator(paths.profileRoot, agents, policies, teamStore, {
   async catalogs(input) {
     assertIdle(); const revision = configurationRevision();
+    const developmentRevision = developmentConfigurationRevision(input.development);
     const members = input.memberAgentIds.map(id => agents.get(id));
     if (input.workspacePath && !selectedWorkspaces.has(input.workspacePath)) throw new Error('폴더 선택 버튼으로 자동 대표의 작업 폴더를 선택하세요.');
     if (input.workspacePath) normalizeWorkspace(input.workspacePath);
@@ -156,6 +161,7 @@ const automaticTeams = new AutomaticTeamCreator(paths.profileRoot, agents, polic
     if (stillConnected.some(value => !value)) throw new Error('모델 확인 중 로그인이 해제되었습니다. 연결을 확인하고 다시 시도하세요.');
     return {catalogs, assertCurrent() {
       assertIdle(); assertConfigurationCurrent(revision);
+      assertDevelopmentConfigurationCurrent(input.development, developmentRevision);
       if (members.some(member => JSON.stringify(agents.get(member.id)) !== JSON.stringify(member))) throw new Error('모델 확인 중 초기 멤버 설정이 변경되었습니다. 다시 확인하세요.');
       if (apis.some(p => !verifiedProfiles.has(p.id) || !secrets.has(apiProfileSecretKey(p)))) throw new Error('모델 확인 중 API 연결 상태가 변경되었습니다. 다시 확인하세요.');
       if (input.workspacePath) normalizeWorkspace(input.workspacePath);
@@ -173,6 +179,13 @@ function object(value: unknown): Record<string, unknown> { if (!value || typeof 
 function string(value: unknown, max = 200): string { if (typeof value !== 'string' || value.length > max || value.includes('\0')) throw new Error('입력값을 확인하세요.'); return value; }
 function provider(value: unknown): LoginProvider { if (value !== 'codex' && value !== 'claude-code') throw new Error('알 수 없는 로그인 공급자입니다.'); return value; }
 function profile(id: string): ApiProviderProfile { const found = settings.getApiProviderProfiles().find(p => p.id === id); if (!found) throw new Error('API 연결을 찾을 수 없습니다.'); return found; }
+function selectedDevelopment(value: unknown, previous?: DevelopmentBinding): DevelopmentBinding | undefined {
+  if (value === undefined) return undefined;
+  if (!validDevelopmentBinding(value)) throw new Error('개발을 맡길 Rabbit 프로젝트 설정을 확인하세요.');
+  // Preserve an existing unavailable reference while editing other settings; execution stays fail-closed.
+  if (previous?.connectionId !== value.connectionId) rabbitStore.getConnection(value.connectionId);
+  return {mode: 'rabbit', connectionId: value.connectionId};
+}
 function readAvatar(id: string) { try { return avatars.get(id); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('프로필 이미지를 찾을 수 없습니다. 다시 생성하세요.'); throw error; } }
 function pruneAvatars(): void { avatars.prune([...agents.list(), ...teamStore.listRuns().flatMap(r => r.memberSnapshots)].flatMap(a => a.avatarId ? [a.avatarId] : []).concat([...sessions.list(), ...unsavedSessions.values()].flatMap(s => s.avatarRequest?.assetId ? [s.avatarRequest.assetId] : []))); }
 function createDefaultAvatar(): string {
@@ -187,6 +200,16 @@ function renameSavedAgent(id: string, name: string, expectedUpdatedAt: string): 
 }
 function hasConnectionReference(id: string): boolean {
   return sessions.list().some(session => session.policyAllowedConnections?.some(route => route.connectionId === id)) || [...sessions.list(), ...agents.list()].some(item => item.connectionId === id || connectionRoutes(item).some(route => route.connectionId === id)) || policies.list().some(p => p.rules.some(r => r.connections.some(c => c.connectionId === id))) || teamStore.referencesConnection(id);
+}
+function hasDevelopmentReference(id: string): boolean {
+  return [...agents.list(), ...sessions.list(), ...unsavedSessions.values(), ...liveSessions.values(), ...teamStore.listTeams()].some(item => item.development?.connectionId === id)
+    || teamStore.listRuns().some(run => run.development?.connectionId === id || run.memberSnapshots.some(member => member.development?.connectionId === id));
+}
+function developmentConfigurationRevision(binding: DevelopmentBinding | undefined): string | undefined {
+  return binding ? JSON.stringify(rabbitStore.listConnections().find(connection => connection.id === binding.connectionId) ?? null) : undefined;
+}
+function assertDevelopmentConfigurationCurrent(binding: DevelopmentBinding | undefined, revision: string | undefined): void {
+  if (developmentConfigurationRevision(binding) !== revision) throw new Error('모델 확인 중 개발 대상 Rabbit 연결이 변경되었습니다. 최신 연결을 확인한 뒤 다시 저장하세요.');
 }
 function assertIdle(): void { if (activeRun || taskQueue.state().running.length || taskQueue.state().queued.length || teamStore.activeRunCount() || avatarJobs.active().length || rabbit.isBusy() || testing) throw new Error('진행 중이거나 대기 중인 작업을 마치거나 중단한 뒤 다시 시도하세요.'); }
 function configurationRevision(): string { return JSON.stringify(settings.getApiProviderProfiles()); }
@@ -424,7 +447,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
   session.messages.push(user, answer);
   if (session.messages.length === 2 && !session.teamRunId) session.title = text.replace(/\s+/g, ' ').slice(0, 45);
   saveSession(session); emit({ type: 'session', session });
-  const history = completedHistory(session, user.id);
+  let history = completedHistory(session, user.id);
   let finalized = false;
   let localFailure = false;
   const local = <T>(operation: () => T): T => { try { return operation(); } catch (error) { localFailure = true; throw error; } };
@@ -438,19 +461,20 @@ async function run(sessionId: string, text: string, controller: AbortController)
     if (!request) throw new Error('현재 팀의 사용자 요청을 확인할 수 없습니다.');
     return [request.goal, ...request.userInstructions].join('\n\n');
   };
-  const projectInstructions = session.agentId && session.purpose !== 'avatar' ? rabbit.instructions(projectTaskText(), projectSource) : '';
-  const systemInstructions = [session.instructions, projectInstructions].filter(Boolean).join('\n\n');
+  const boundRecords = session.development ? rabbitStore.listRuns().filter(record => record.connectionId === session.development!.connectionId && record.source && (record.source.sessionId === sessionId || !!session.teamRunId && record.source.teamRunId === session.teamRunId && record.source.agentId === session.agentId)).map(record => ({id: record.id, phase: record.phase, state: record.detail?.state})).slice(0,100) : [];
+  const projectInstructions = session.agentId && session.purpose !== 'avatar' ? (session.development ? `${developmentInstructions(session.development)}\n기존 원격 실행 기록(새 요청으로 반복하지 마세요): ${JSON.stringify(boundRecords)}` : rabbit.instructions(projectTaskText(), projectSource)) : '';
+  let systemInstructions = [session.instructions, projectInstructions].filter(Boolean).join('\n\n');
   const authorizeWorkspace = async (request: ActionApprovalRequest) => {
-    if (request.operation === 'write') rabbit.assertLocalWrite(projectTaskText(), projectSource);
+    if (request.operation === 'write') {assertDevelopmentWriteAllowed(session.development); rabbit.assertLocalWrite(projectTaskText(), projectSource);}
     const allowed = await authorize(request);
-    if (request.operation === 'write') rabbit.assertLocalWrite(projectTaskText(), projectSource);
+    if (request.operation === 'write') {assertDevelopmentWriteAllowed(session.development); rabbit.assertLocalWrite(projectTaskText(), projectSource);}
     return allowed;
   };
   let executor: WorkspaceExecutor | undefined;
   const teamTools = teams.tools(sessionId, controller.signal);
   const currentAgent = session.agentId && !session.teamRunId ? agents.list().find(a => a.id === session.agentId) : undefined;
   const projectTools = session.agentId && session.purpose !== 'avatar' ? new RabbitTools({
-    connections: () => rabbit.connections().filter(c => c.hasKey),
+    connections: () => rabbit.connections().filter(c => c.hasKey && (!session.development || c.id === session.development.connectionId)),
     repositories: connection => rabbit.test(connection, controller.signal, true),
     start: (connection, input, requestId, source) => rabbit.start(connection.id, input, requestId, source, controller.signal),
     getRecord: id => rabbitStore.getRun(id), refresh: record => rabbit.refresh(record.id, controller.signal, true),
@@ -486,7 +510,6 @@ async function run(sessionId: string, text: string, controller: AbortController)
     if (Date.now() - lastSaved > 1500) { persist(); lastSaved = Date.now(); }
   };
   try {
-    if (JSON.stringify(history).length > 500_000) throw new Error('대화가 너무 길어졌습니다. 새 대화에서 이어가세요. 현재 이력은 저장되어 있습니다.');
     if (session.policySnapshot) {
       const chosen = await policyChoice(session.policySnapshot, session.policyAllowedConnections ?? connectionRoutes(session), session.policyTaskText ?? text);
       if (controller.signal.aborted) throw new DOMException('중단했습니다.', 'AbortError');
@@ -494,6 +517,12 @@ async function run(sessionId: string, text: string, controller: AbortController)
       const first = chosen.connections[0]!; session.connectionId = first.connectionId; session.model = first.model; if (first.effort) session.effort = first.effort; else delete session.effort;
       persist(); emit({type: 'session', session});
     } else if (session.routeSelection) answer.routeSelection = structuredClone(session.routeSelection);
+    const efficiency = session.routeSelection?.efficiency;
+    if (efficiency) {
+      const bounded = boundPolicyHistory(history, efficiency); history = bounded.messages;
+      systemInstructions = [systemInstructions, efficiencyInstructions(efficiency, bounded.omittedTurns)].filter(Boolean).join('\n\n');
+    }
+    if (JSON.stringify(history).length > 500_000) throw new Error('대화가 너무 길어졌습니다. 새 대화에서 이어가세요. 현재 이력은 저장되어 있습니다.');
     if (session.workspacePath) executor = new WorkspaceExecutor(session.workspacePath, approve, controller.signal, authorizeWorkspace);
     const tools = [...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? [])];
     const routes = connectionRoutes(session);
@@ -520,13 +549,14 @@ async function run(sessionId: string, text: string, controller: AbortController)
         } else if (route.connectionId === 'claude-code') {
           const priorBinding = session.providerSessionBinding ?? (session.connectionId === 'claude-code' ? connectionRouteKey(session) : undefined);
           if (priorBinding !== connectionRouteKey(route)) { delete session.providerSessionId; delete session.providerSessionBinding; }
-          const previous = session.providerSessionId;
+          // A native resume would restore omitted history and bypass the opt-in budget.
+          const previous = efficiency ? undefined : session.providerSessionId;
           resumeParent = previous;
           if (tools.length) {
             try { mcp = await startMcpGateway((name, args, id) => executeAttempt({name}, args, id), attemptController.signal, tools); }
             catch (error) { localFailure = true; throw error; }
           }
-          for await (const event of runClaudeTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), ...(systemInstructions ? {systemInstructions} : {}), ...(previous ? {sessionId: previous} : {}), ...(!previous && routes.length > 1 ? {historyHandoff: true} : {}), ...(mcp ? {mcpServer: {url: mcp.url, token: mcp.token}} : {}), signal: attemptController.signal })) {
+          for await (const event of runClaudeTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), ...(systemInstructions ? {systemInstructions} : {}), ...(previous ? {sessionId: previous} : {}), ...(!previous && (routes.length > 1 || efficiency || session.messages.some(message => message.routeSelection?.efficiency)) ? {historyHandoff: true} : {}), ...(mcp ? {mcpServer: {url: mcp.url, token: mcp.token}} : {}), signal: attemptController.signal })) {
             if (event.type === 'text-delta') addText(event.delta);
             if (event.type === 'done') { completed = true; if (!answer.text) addText(event.text); nextProviderSessionId = event.sessionId; local(() => settings.recordInferenceUsage('claude-code', event.usage)); }
           }
@@ -567,7 +597,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
       attempt.status = 'completed';
       session.connectionId = route.connectionId; session.model = route.model;
       if (route.effort) session.effort = route.effort; else delete session.effort;
-      if (route.connectionId === 'claude-code' && nextProviderSessionId) { session.providerSessionId = nextProviderSessionId; session.providerSessionBinding = connectionRouteKey(route); }
+      if (!efficiency && route.connectionId === 'claude-code' && nextProviderSessionId) { session.providerSessionId = nextProviderSessionId; session.providerSessionBinding = connectionRouteKey(route); }
       else { delete session.providerSessionId; delete session.providerSessionBinding; }
       answer.status = 'completed'; break;
     }
@@ -716,7 +746,7 @@ async function request(method: string, raw: unknown): Promise<unknown> {
     case 'createSession': {
       if (args.agentId != null) {
         const agent = agents.get(string(args.agentId)), connections = connectionRoutes(agent), first = connections[0]!;
-        return sessions.create(first.connectionId, first.model, agent.workspacePath, first.effort, {connections, agentId: agent.id, agentName: agent.name, instructions: agent.instructions, ...(agent.automation ? {automation: agent.automation, policyAllowedConnections: connections} : {})});
+        return sessions.create(first.connectionId, first.model, agent.workspacePath, first.effort, {connections, agentId: agent.id, agentName: agent.name, instructions: agent.instructions, ...(agent.development ? {development: structuredClone(agent.development)} : {}), ...(agent.automation ? {automation: agent.automation, policyAllowedConnections: connections} : {})});
       }
       const revision = configurationRevision(), connectionId = string(args.connectionId); const chosen = await selection(connectionId, string(args.model ?? '').trim(), args.effort == null || args.effort === '' ? undefined : string(args.effort, 40));
       assertConfigurationCurrent(revision);
@@ -728,17 +758,25 @@ async function request(method: string, raw: unknown): Promise<unknown> {
       const data = object(args.agent); const id = data.id == null || data.id === '' ? undefined : string(data.id); const old = id ? agents.get(id) : undefined;
       const name = string(data.name, 80).trim(), instructions = string(data.instructions, 16000).trim();
       if (!name || !instructions) throw new Error('에이전트 이름과 역할 지시문을 입력하세요.');
+      const development = selectedDevelopment(data.development, old?.development), developmentRevision = developmentConfigurationRevision(development);
       const revision = configurationRevision(), connections = await selectedConnections(data);
       assertConfigurationCurrent(revision, old);
+      assertDevelopmentConfigurationCurrent(development, developmentRevision);
       const workspacePath = data.workspacePath == null || data.workspacePath === '' ? undefined : string(data.workspacePath, 4096);
       if (workspacePath && workspacePath !== old?.workspacePath && !selectedWorkspaces.has(workspacePath)) throw new Error('폴더 선택 버튼으로 작업 폴더를 선택하세요.');
       if (workspacePath) normalizeWorkspace(workspacePath);
       const automation = data.automation == null ? undefined : {policyId: policies.get(string(object(data.automation).policyId, 100)).id};
       const avatarId = data.avatarId === '' ? undefined : data.avatarId == null ? old?.avatarId ?? createDefaultAvatar() : string(data.avatarId, 100); if (avatarId) readAvatar(avatarId);
-      agents.save({...(id ? {id} : {}), name, instructions, ...connections[0]!, connections, ...(workspacePath ? {workspacePath} : {}), ...(avatarId ? {avatarId} : {}), ...(automation ? {automation} : {})}); return state();
+      agents.save({...(id ? {id} : {}), name, instructions, ...connections[0]!, connections, ...(workspacePath ? {workspacePath} : {}), ...(avatarId ? {avatarId} : {}), ...(automation ? {automation} : {}), ...(development ? {development} : {})}); return state();
     }
     case 'saveRabbitConnection': {
-      assertIdle(); credentialMutation = true;
+      assertIdle();
+      const input = object(args.connection);
+      if (input.id) {
+        const previous = rabbitStore.getConnection(string(input.id, 100)), next = normalizeRabbitConnectionDraft(input);
+        if (hasDevelopmentReference(previous.id) && (previous.baseUrl !== next.baseUrl || previous.projectId !== next.projectId || previous.allowInsecureLoopback !== next.allowInsecureLoopback)) throw new Error('에이전트·팀 또는 대화가 개발 대상으로 참조하는 연결의 서버·프로젝트는 바꿀 수 없습니다. 별도 Rabbit 연결을 추가한 뒤 새 작업에 지정하세요.');
+      }
+      credentialMutation = true;
       try {await rabbit.saveConnection(args.connection, args.apiKey, args.expectedUpdatedAt == null ? undefined : string(args.expectedUpdatedAt, 40)); return state();}
       finally {credentialMutation = false;}
     }
@@ -757,6 +795,12 @@ async function request(method: string, raw: unknown): Promise<unknown> {
     }
     case 'saveActionRules': {
       const saved = actionRules.save(args.rules, string(args.expectedUpdatedAt, 40)); emit({type: 'action-rules', rules: saved}); return state();
+    }
+    case 'policyEfficiencyPreset': {
+      const connections = normalizePolicyConnections(args.connections), revision = configurationRevision();
+      const stamp = new Date().toISOString(), member: AgentProfile = {id: 'efficiency-preview', name: '절약 설정', instructions: '절약 설정', ...connections[0]!, connections, createdAt: stamp, updatedAt: stamp};
+      const result = policyEfficiencyPreset(args.preset, connections, await teamCatalogs([member]));
+      assertConfigurationCurrent(revision); return result;
     }
     case 'savePolicy': {
       const rawPolicy = object(args.policy), draft = normalizeAgentPolicyDraft(rawPolicy);
@@ -828,14 +872,15 @@ async function request(method: string, raw: unknown): Promise<unknown> {
     case 'cancelAutomaticTeamCreation': return {cancelled: automaticTeams.cancel(string(args.requestId, 100))};
     case 'saveTeam': {
       const submitted = object(args.team);
-      if (submitted.leaderMode === 'automatic') {await automaticTeams.create(submitted); return state();}
+      if (submitted.leaderMode === 'automatic') {selectedDevelopment(submitted.development); await automaticTeams.create(submitted); return state();}
       if (submitted.leaderMode !== undefined && submitted.leaderMode !== 'existing') throw new Error('대표 생성 방식을 확인하세요.');
       const data = object(args.team), id = data.id == null || data.id === '' ? undefined : string(data.id);
       if (id && string(args.expectedUpdatedAt ?? data.updatedAt ?? '', 40) !== teamStore.getTeam(id).updatedAt) throw new Error('팀 설정이 변경되었습니다. 최신 팀 설정을 다시 불러온 뒤 저장하세요.');
       if (!Array.isArray(data.memberAgentIds) || data.memberAgentIds.length < 1) throw new Error('등록된 에이전트 중 대표를 포함해 팀 멤버를 선택하세요.');
       if (data.autonomous !== undefined && typeof data.autonomous !== 'boolean') throw new Error('대표 자율주행 설정을 확인하세요.');
       const memberAgentIds = data.memberAgentIds.map(value => agents.get(string(value)).id);
-      teamStore.saveTeam({...(id ? {id} : {}), name: string(data.name, 80).trim(), instructions: string(data.instructions ?? '', 16000).trim(), topic: string(data.topic ?? '', 4000).trim(), policies: string(data.policies ?? '', 16000).trim(), leaderAgentId: string(data.leaderAgentId ?? memberAgentIds[0]), memberAgentIds, rounds: Number(data.rounds ?? 1), autonomous: data.autonomous === undefined ? (id ? teamStore.getTeam(id).autonomous === true : false) : data.autonomous === true}); return state();
+      const development = selectedDevelopment(data.development, id ? teamStore.getTeam(id).development : undefined);
+      teamStore.saveTeam({...(id ? {id} : {}), ...(development ? {development} : {}), name: string(data.name, 80).trim(), instructions: string(data.instructions ?? '', 16000).trim(), topic: string(data.topic ?? '', 4000).trim(), policies: string(data.policies ?? '', 16000).trim(), leaderAgentId: string(data.leaderAgentId ?? memberAgentIds[0]), memberAgentIds, rounds: Number(data.rounds ?? 1), autonomous: data.autonomous === undefined ? (id ? teamStore.getTeam(id).autonomous === true : false) : data.autonomous === true}); return state();
     }
     case 'deleteTeam': { teamStore.removeTeam(string(args.id)); return state(); }
     case 'startTeamRun': {

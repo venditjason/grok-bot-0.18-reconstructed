@@ -1,3 +1,4 @@
+import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
 import {lstatSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -9,11 +10,11 @@ import {normalizeManagedName} from './agent-management-tools.js';
 export type TeamStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type TeamStepStatus = TeamStatus | 'pending';
 export type TeamCreation = {requestId: string; inputHash: string; leaderAgentId: string; policyId: string};
-export type TeamProfile = {creation?: TeamCreation; autonomous?: boolean; id: string; name: string; instructions: string; topic: string; policies: string; leaderAgentId: string; memberAgentIds: string[]; rounds: number; createdAt: string; updatedAt: string};
+export type TeamProfile = {development?: DevelopmentBinding;creation?: TeamCreation; autonomous?: boolean; id: string; name: string; instructions: string; topic: string; policies: string; leaderAgentId: string; memberAgentIds: string[]; rounds: number; createdAt: string; updatedAt: string};
 export type TeamMessage = {id: string; fromAgentId?: string; fromAgentName: string; toAgentId?: string; text: string; kind: 'user' | 'agent' | 'result' | 'system'; sessionId?: string; createdAt: string};
 export type TeamStep = {sessionId: string; agentId: string; agentName: string; round: number; kind: 'plan' | 'work' | 'summary'; taskKind?: 'routine' | 'standard' | 'complex'; connections?: ConnectionRoute[]; routeSelection?: AgentPolicySelection; task?: string; parentSessionId?: string; status: TeamStepStatus};
 export type TeamContext = {runId: string; goal: string; policies: string; result: string; excerpt: boolean};
-export type StoredTeamRun = {autonomous?: boolean; id: string; teamId: string; teamName: string; teamUpdatedAt: string; previousRunId?: string; context?: TeamContext[]; policySnapshots?: {agentId: string; policy: AgentPolicy}[]; goal: string; instructions: string; topic: string; policies: string; leaderAgentId: string; activeMemberAgentIds: string[]; memberSnapshots: AgentProfile[]; additions: number; status: TeamStatus; rounds: number; createdAt: string; updatedAt: string; steps: TeamStep[]; messages: TeamMessage[]; finalSessionId?: string; error?: string};
+export type StoredTeamRun = {development?: DevelopmentBinding;autonomous?: boolean; id: string; teamId: string; teamName: string; teamUpdatedAt: string; previousRunId?: string; context?: TeamContext[]; policySnapshots?: {agentId: string; policy: AgentPolicy}[]; goal: string; instructions: string; topic: string; policies: string; leaderAgentId: string; activeMemberAgentIds: string[]; memberSnapshots: AgentProfile[]; additions: number; status: TeamStatus; rounds: number; createdAt: string; updatedAt: string; steps: TeamStep[]; messages: TeamMessage[]; finalSessionId?: string; error?: string};
 export type TeamRunSummary = Omit<StoredTeamRun, 'instructions' | 'memberSnapshots' | 'messages' | 'teamUpdatedAt' | 'activeMemberAgentIds' | 'additions' | 'context' | 'policySnapshots'> & {members: {id: string; name: string}[]; messageCount: number};
 export type TeamRunDetail = TeamRunSummary & {messages: TeamMessage[]};
 export const teamLimits = {teams: 50, runs: 200, active: 4, plans: 3, delegated: 8, messages: 200, toolInputBytes: 1024 * 1024, messageCharacters: 8000} as const;
@@ -27,13 +28,13 @@ const ids = (value: unknown, min = 1): value is string[] => Array.isArray(value)
 export function validTeam(value: unknown): value is TeamProfile {
   if (!value || typeof value !== 'object') return false;
   const t = value as TeamProfile;
-  return (t.creation === undefined || (!!t.creation && typeof t.creation === 'object' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(t.creation.requestId) && /^[a-f0-9]{64}$/.test(t.creation.inputHash) && text(t.creation.leaderAgentId, 100) && text(t.creation.policyId, 100))) && (t.autonomous === undefined || typeof t.autonomous === 'boolean') && text(t.id, 100) && text(t.name, 80) && text(t.instructions, 16000, false) && text(t.topic, 4000, false) && text(t.policies, 16000, false) && Number.isInteger(t.rounds) && t.rounds >= 1 && t.rounds <= 3 && date(t.createdAt) && date(t.updatedAt)
+  return (t.development === undefined || validDevelopmentBinding(t.development)) && (t.creation === undefined || (!!t.creation && typeof t.creation === 'object' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(t.creation.requestId) && /^[a-f0-9]{64}$/.test(t.creation.inputHash) && text(t.creation.leaderAgentId, 100) && text(t.creation.policyId, 100))) && (t.autonomous === undefined || typeof t.autonomous === 'boolean') && text(t.id, 100) && text(t.name, 80) && text(t.instructions, 16000, false) && text(t.topic, 4000, false) && text(t.policies, 16000, false) && Number.isInteger(t.rounds) && t.rounds >= 1 && t.rounds <= 3 && date(t.createdAt) && date(t.updatedAt)
     && ids(t.memberAgentIds) && t.memberAgentIds.includes(t.leaderAgentId);
 }
 export function validTeamRun(value: unknown): value is StoredTeamRun {
   if (!value || typeof value !== 'object') return false;
   const r = value as StoredTeamRun;
-  if ((r.autonomous !== undefined && typeof r.autonomous !== 'boolean') || !text(r.id, 100) || !text(r.teamId, 100) || !text(r.teamName, 80) || !text(r.goal, 8000) || !text(r.instructions, 16000, false) || !text(r.topic, 4000, false) || !text(r.policies, 16000, false) || !date(r.teamUpdatedAt) || !date(r.createdAt) || !date(r.updatedAt)
+  if ((r.development !== undefined && !validDevelopmentBinding(r.development)) || (r.autonomous !== undefined && typeof r.autonomous !== 'boolean') || !text(r.id, 100) || !text(r.teamId, 100) || !text(r.teamName, 80) || !text(r.goal, 8000) || !text(r.instructions, 16000, false) || !text(r.topic, 4000, false) || !text(r.policies, 16000, false) || !date(r.teamUpdatedAt) || !date(r.createdAt) || !date(r.updatedAt)
     || (r.previousRunId !== undefined && !text(r.previousRunId, 100)) || (r.context !== undefined && (!Array.isArray(r.context) || r.context.length > 3 || JSON.stringify(r.context).length > 32000 || !r.context.every(c => c && text(c.runId, 100) && text(c.goal, 2000) && text(c.policies, 2000, false) && text(c.result, 5500, false) && typeof c.excerpt === 'boolean')))
     || !Number.isInteger(r.rounds) || r.rounds < 1 || r.rounds > 3 || !Number.isSafeInteger(r.additions) || r.additions < 0
     || !['queued', 'running', 'completed', 'failed', 'cancelled'].includes(r.status) || (r.error !== undefined && !text(r.error, 2000, false))

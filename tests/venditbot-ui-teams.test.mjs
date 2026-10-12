@@ -229,11 +229,12 @@ test('an agent can join multiple teams and twenty-member teams keep every regist
 test('agent and team cards expose context, keyboard and whole-card dragging with stable IDs', () => {
   const menus = [], props = { agents, teams: [team], avatarUrl: noop, onOpen: noop, onMenu: id => menus.push(id), onReorder: noop };
   const cards = treeElements(AgentSidebarCards(props)), card = cards.find(node => node.props.onContextMenu), trigger = cards.find(node => node.type?.name === 'SidebarProfileCard');
-  let prevented = 0; card.props.onContextMenu({ preventDefault() { prevented++; } }); card.props.onKeyDown({ key: 'F10', shiftKey: true, preventDefault() { prevented++; } });
+  const currentTarget = { getBoundingClientRect: () => ({ left: 20, bottom: 120, width: 80 }) };
+  let prevented = 0; card.props.onContextMenu({ currentTarget, clientX: 40, clientY: 80, preventDefault() { prevented++; } }); card.props.onKeyDown({ currentTarget, key: 'F10', shiftKey: true, preventDefault() { prevented++; } });
   assert.deepEqual(menus, ['planner', 'planner']); assert.equal(prevented, 2);
   assert.equal(trigger.props.kind, 'agent'); assert.equal(trigger.props.id, 'planner'); assert.deepEqual(trigger.props.itemIds, ['planner', 'reviewer']);
   assert.equal(cards[0].props['data-sidebar-list'], 'agent'); assert.equal(cards.filter(node => node.props['data-sidebar-id'])[1].props['data-sidebar-id'], 'reviewer');
-  const teams = treeElements(TeamSidebarCards({ ...props, onCreate: noop })); teams.find(node => node.props.onContextMenu).props.onKeyDown({ key: 'ContextMenu', preventDefault() {} }); assert.equal(menus.at(-1), team.id); assert.equal(teams[0].props['data-sidebar-list'], 'team');
+  const teams = treeElements(TeamSidebarCards({ ...props, onCreate: noop })); teams.find(node => node.props.onContextMenu).props.onKeyDown({ currentTarget, key: 'ContextMenu', preventDefault() {} }); assert.equal(menus.at(-1), team.id); assert.equal(teams[0].props['data-sidebar-list'], 'team');
 });
 
 

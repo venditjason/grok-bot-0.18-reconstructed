@@ -309,3 +309,35 @@ test('only an actual install request shows preparation while IPC waits and rejec
   assert.equal(component(tree, 'UpdateControl').props.installRequested, false); assert.equal(component(tree, 'UpdateControl').props.busy, false);
   assert.match(text(tree), /실행 중인 작업 때문에 설치를 준비할 수 없습니다/);
 });
+
+test('efficiency preset applies only to the selected rule, survives reload, and is persisted by explicit save', async () => {
+  const policy = { id: 'policy', name: '루틴 절약', description: '', defaultTaskKind: 'standard', rules: ['routine','standard','complex'].map(taskKind => ({ taskKind, keywords: [], connections: [{ connectionId: 'api', model: 'fixture' }] })), createdAt: '2026-01-01', updatedAt: '2026-01-02' };
+  const snapshot = { ...state, policies: [policy], profiles: [{ id: 'api', name: 'API', model: 'fixture', hasKey: true }] }, disk = memoryStorage(); let render = fixture(snapshot, disk), tree = render();
+  button(tree, '설정').props.onPress(); tree = render(); button(tree, '작업 정책').props.onPress(); tree = render(); component(tree, 'PolicySettings').props.onEdit(policy.id); tree = render();
+  const result = { keywords: ['상태 확인'], connections: [{ connectionId: 'api', model: 'fixture' }], efficiency: { preset: 'status_check', maxHistoryTurns: 1, maxHistoryCharacters: 4000 } }, calls = [];
+  invoke = async (method, args) => { calls.push([method, args]); return result; }; component(tree, 'PolicySettings').props.onApplyEfficiencyPreset('routine', 'status_check'); await tick(); tree = render();
+  assert.deepEqual(calls, [['policyEfficiencyPreset', { preset: 'status_check', connections: policy.rules[0].connections }]]);
+  assert.deepEqual(component(tree, 'PolicySettings').props.record.draft.rules[0], { taskKind: 'routine', ...result }); assert.deepEqual(component(tree, 'PolicySettings').props.record.draft.rules.slice(1), policy.rules.slice(1));
+  render = fixture(snapshot, disk); tree = render(); button(tree, '초안 보기').props.onPress(); tree = render(); component(tree, 'DraftRecovery').props.onPolicy(policy.id); tree = render(); assert.deepEqual(component(tree, 'PolicySettings').props.record.draft.rules[0].efficiency, result.efficiency);
+  invoke = async (method, args) => { calls.push([method, args]); return { ...snapshot, policies: [{ ...policy, ...args.policy }] }; }; component(tree, 'PolicySettings').props.onSave(); await tick(); assert.equal(calls.at(-1)[0], 'savePolicy'); assert.deepEqual(calls.at(-1)[1].policy.rules[0].efficiency, result.efficiency);
+});
+
+test('late efficiency discovery cannot overwrite newer draft input or another policy editor', async () => {
+  for (const change of ['input', 'policy']) {
+    const policy = { id: 'one', name: '기존 정책', description: '', defaultTaskKind: 'standard', rules: ['routine','standard','complex'].map(taskKind => ({ taskKind, keywords: [], connections: [{ connectionId: 'api', model: 'fixture' }] })), createdAt: '2026-01-01', updatedAt: '2026-01-02' }, second = { ...policy, id: 'two', name: '다른 정책' };
+    const render = fixture({ ...state, policies: [policy, second] }); let tree = render(); button(tree, '설정').props.onPress(); tree = render(); button(tree, '작업 정책').props.onPress(); tree = render(); component(tree, 'PolicySettings').props.onEdit(policy.id); tree = render();
+    let finish; invoke = async () => new Promise(resolve => { finish = resolve; }); component(tree, 'PolicySettings').props.onApplyEfficiencyPreset('routine', 'status_check'); tree = render();
+    const editor = component(tree, 'PolicySettings'); if (change === 'policy') editor.props.onEdit(second.id); else editor.props.onChange({ ...editor.props.record, draft: { ...editor.props.record.draft, name: '새 입력 유지' } });
+    finish({ keywords: ['상태'], connections: [], efficiency: { preset: 'status_check', maxHistoryTurns: 1, maxHistoryCharacters: 4000 } }); await tick(); tree = render();
+    assert.equal(component(tree, 'PolicySettings').props.record.draft.name, change === 'policy' ? second.name : '새 입력 유지'); assert.equal(component(tree, 'PolicySettings').props.record.draft.rules[0].efficiency, undefined);
+  }
+});
+
+test('agent default and per-team Rabbit project settings reach save IPC and survive local draft recovery', async () => {
+  const development = { mode: 'rabbit', connectionId: 'rabbit-project' }, snapshot = { ...state, profiles: [{ id: 'api', name: 'API', model: 'fixture', hasKey: true }] }, disk = memoryStorage(); let render = fixture(snapshot, disk), tree = render();
+  navClick(tree, '에이전트 목록', agent.name); tree = render(); button(tree, '에이전트 설정').props.onPress(); tree = render(); component(tree, 'DevelopmentRoutingPicker').props.onChange(development); tree = render();
+  let saved; invoke = async (method, args) => { saved = [method, args]; return { ...snapshot, agents: [{ ...agent, ...args.agent }] }; }; button(tree, '에이전트 저장').props.onPress(); await tick(); assert.equal(saved[0], 'saveAgent'); assert.deepEqual(saved[1].agent.development, development);
+  tree = render(); navClick(tree, '협업 팀 목록', team.name); tree = render(); button(tree, '팀 설정').props.onPress(); tree = render(); const editor = component(tree, 'TeamEditor'); editor.props.onChange({ ...editor.props.draft, development });
+  render = fixture(snapshot, disk); tree = render(); button(tree, '초안 보기').props.onPress(); tree = render(); component(tree, 'DraftRecovery').props.onTeam(team.id); tree = render(); assert.deepEqual(component(tree, 'TeamEditor').props.draft.development, development);
+  invoke = async (method, args) => { saved = [method, args]; return { ...snapshot, teams: [{ ...team, ...args.team }] }; }; component(tree, 'TeamEditor').props.onSave(); await tick(); assert.equal(saved[0], 'saveTeam'); assert.deepEqual(saved[1].team.development, development);
+});

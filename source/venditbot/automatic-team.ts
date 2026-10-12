@@ -1,3 +1,4 @@
+import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
 import {createHash, randomUUID} from 'node:crypto';
 import {existsSync, lstatSync, readFileSync, unlinkSync} from 'node:fs';
 import {join} from 'node:path';
@@ -9,7 +10,7 @@ import {normalizeAgentPolicy, normalizeAgentPolicyDraft, type AgentPolicyDraft} 
 import type {ProviderModel} from '../shared/provider-model-catalog.js';
 import {recommendRoutineConnections} from './delegation-policy.js';
 
-export type AutomaticTeamInput = {requestId: string; name: string; projectBrief: string; instructions: string; policies: string; memberAgentIds: string[]; workspacePath?: string};
+export type AutomaticTeamInput = {development?: DevelopmentBinding;requestId: string; name: string; projectBrief: string; instructions: string; policies: string; memberAgentIds: string[]; workspacePath?: string};
 export type AutomaticTeamCatalog = {connectionId: string; models: ProviderModel[]};
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const bounded = (value: unknown, max: number, empty = false): string => {
@@ -19,9 +20,10 @@ const bounded = (value: unknown, max: number, empty = false): string => {
 export function normalizeAutomaticTeamInput(value: unknown): AutomaticTeamInput {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('대표 자동 생성 요청을 확인하세요.');
   const raw = value as Record<string, unknown>;
+  if (raw.development !== undefined && !validDevelopmentBinding(raw.development)) throw new Error('개발을 맡길 Rabbit 프로젝트 설정을 확인하세요.');
   if (!uuid.test(String(raw.requestId ?? '')) || raw.id || raw.leaderMode !== 'automatic') throw new Error('자동 대표는 고유한 생성 요청으로 새 팀에서 만드세요.');
   if (!Array.isArray(raw.memberAgentIds) || raw.memberAgentIds.some(id => typeof id !== 'string' || !id || id.length > 100) || new Set(raw.memberAgentIds).size !== raw.memberAgentIds.length) throw new Error('초기 멤버를 중복 없이 선택하세요.');
-  return {requestId: String(raw.requestId).toLowerCase(), name: bounded(raw.name, 80), projectBrief: bounded(raw.projectBrief, 4000), instructions: bounded(raw.instructions ?? '', 8000, true), policies: bounded(raw.policies ?? '', 8000, true), memberAgentIds: [...raw.memberAgentIds] as string[], ...(raw.workspacePath ? {workspacePath: bounded(raw.workspacePath, 4096)} : {})};
+  return {...(validDevelopmentBinding(raw.development) ? {development: {mode: 'rabbit' as const, connectionId: raw.development.connectionId}} : {}), requestId: String(raw.requestId).toLowerCase(), name: bounded(raw.name, 80), projectBrief: bounded(raw.projectBrief, 4000), instructions: bounded(raw.instructions ?? '', 8000, true), policies: bounded(raw.policies ?? '', 8000, true), memberAgentIds: [...raw.memberAgentIds] as string[], ...(raw.workspacePath ? {workspacePath: bounded(raw.workspacePath, 4096)} : {})};
 }
 export const automaticTeamFingerprint = (input: AutomaticTeamInput): string => createHash('sha256').update(JSON.stringify(input)).digest('hex');
 export function planAutomaticTeam(input: AutomaticTeamInput, catalogs: AutomaticTeamCatalog[]): {leaderName: string; instructions: string; policies: string; connections: ConnectionRoute[]; policy: AgentPolicyDraft} {
@@ -120,8 +122,8 @@ export class AutomaticTeamCreator {
     try {
       if (this.ports.createAvatar(avatarId) !== avatarId) throw new Error('Automatic avatar identity changed.');
       const policy = this.policies.save(plan.policy);
-      const leader = this.agents.save({name: plan.leaderName, instructions: plan.instructions, ...plan.connections[0]!, connections: plan.connections, avatarId, automation: {policyId: policy.id}, ...(input.workspacePath ? {workspacePath: input.workspacePath} : {})});
-      saved = this.teams.saveTeam({name: input.name, topic: input.projectBrief, instructions: input.instructions, policies: plan.policies, leaderAgentId: leader.id, memberAgentIds: [leader.id, ...input.memberAgentIds], autonomous: true, rounds: 1, creation: {requestId: input.requestId, inputHash: hash, leaderAgentId: leader.id, policyId: policy.id}});
+      const leader = this.agents.save({...(input.development ? {development: structuredClone(input.development)} : {}), name: plan.leaderName, instructions: plan.instructions, ...plan.connections[0]!, connections: plan.connections, avatarId, automation: {policyId: policy.id}, ...(input.workspacePath ? {workspacePath: input.workspacePath} : {})});
+      saved = this.teams.saveTeam({...(input.development ? {development: structuredClone(input.development)} : {}), name: input.name, topic: input.projectBrief, instructions: input.instructions, policies: plan.policies, leaderAgentId: leader.id, memberAgentIds: [leader.id, ...input.memberAgentIds], autonomous: true, rounds: 1, creation: {requestId: input.requestId, inputHash: hash, leaderAgentId: leader.id, policyId: policy.id}});
     } catch (error) {
       try {recoverAutomaticTeamCreation(this.root); this.agents.reload(); this.policies.reload();}
       catch {this.recoveryRequired = true; throw new Error('자동 팀 생성 중 저장 복구를 완료하지 못했습니다. 복구 기록과 기존 데이터를 보존했습니다. 앱을 다시 시작하세요.');}

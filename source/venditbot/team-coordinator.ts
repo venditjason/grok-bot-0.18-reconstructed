@@ -1,3 +1,4 @@
+import {resolveTeamDevelopment} from '../shared/development-routing.js';
 import {randomUUID} from 'node:crypto';
 import {safeError, validConnections, type ConnectionRoute, type ChatSession} from './local-store.js';
 import type {AgentProfile} from './agent-store.js';
@@ -61,7 +62,9 @@ export class TeamCoordinator {
     if (members.map(a => a.id).join('\0') !== team.memberAgentIds.join('\0')) throw new Error('팀 멤버 구성이 일치하지 않습니다.');
     const context = contextRunId ? this.context(teamId, contextRunId) : undefined;
     const now = new Date().toISOString(), leader = members.find(a => a.id === team.leaderAgentId)!;
-    const run: StoredTeamRun = {autonomous: team.autonomous ?? false, id: randomUUID(), teamId, ...(contextRunId ? {previousRunId: contextRunId, context: context!} : {}), teamName: team.name, teamUpdatedAt: team.updatedAt, goal: goal.trim(), instructions: team.instructions, topic: team.topic, policies: team.policies, leaderAgentId: leader.id, activeMemberAgentIds: members.map(a => a.id), memberSnapshots: structuredClone(members), additions: 0, status: 'queued', rounds: 1, createdAt: now, updatedAt: now,
+    const development = resolveTeamDevelopment(team.development, leader.development);
+    if (contextRunId && JSON.stringify(this.store.getRun(contextRunId).development ?? null) !== JSON.stringify(development ?? null)) throw new Error('개발 프로젝트가 바뀌었습니다. 이전 프로젝트의 문맥을 넘기지 않고 새 팀 작업을 시작하세요.');
+    const run: StoredTeamRun = {...(development ? {development} : {}), autonomous: team.autonomous ?? false, id: randomUUID(), teamId, ...(contextRunId ? {previousRunId: contextRunId, context: context!} : {}), teamName: team.name, teamUpdatedAt: team.updatedAt, goal: goal.trim(), instructions: team.instructions, topic: team.topic, policies: team.policies, leaderAgentId: leader.id, activeMemberAgentIds: members.map(a => a.id), memberSnapshots: structuredClone(members), additions: 0, status: 'queued', rounds: 1, createdAt: now, updatedAt: now,
       steps: [{sessionId: randomUUID(), agentId: leader.id, agentName: leader.name, round: 1, kind: 'plan', status: 'pending'}],
       messages: [{id: randomUUID(), fromAgentName: '사용자', text: goal.trim(), kind: 'user', createdAt: now}]};
     const snapshots = members.flatMap(member => {const policy = this.port.policyForAgent?.(member); return policy ? [{agentId: member.id, policy}] : [];});
@@ -253,7 +256,11 @@ export class TeamCoordinator {
         let member = template;
         if (defaultTemplate || args.name !== undefined || args.instructions !== undefined) {
           abort(signal);
-          const created = this.port.cloneAgent(structuredClone(template), {name: typeof args.name === 'string' ? normalizeManagedName(args.name) : `${template.name.slice(0, 60)} 팀원 ${run.additions + 1}`, ...(typeof args.instructions === 'string' ? {instructions: args.instructions.trim()} : {})});
+          const scopedTemplate = structuredClone(template);
+          // A newly saved role belongs to the captured project of this run,
+          // even when its source template has an unrelated personal default.
+          if (run.development) scopedTemplate.development = structuredClone(run.development);
+          const created = this.port.cloneAgent(scopedTemplate, {name: typeof args.name === 'string' ? normalizeManagedName(args.name) : `${template.name.slice(0, 60)} 팀원 ${run.additions + 1}`, ...(typeof args.instructions === 'string' ? {instructions: args.instructions.trim()} : {})});
           // Never expose rollback as arbitrary saved-agent deletion, even if a faulty host returns an existing ID.
           if (!created || available.some(a => a.id === created.id) || run.memberSnapshots.some(a => a.id === created.id)) throw new Error('새 에이전트 식별자가 기존 기록과 충돌합니다. 기존 에이전트는 보존했습니다.');
           member = cloned = created;

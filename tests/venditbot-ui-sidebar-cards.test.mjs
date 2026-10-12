@@ -90,7 +90,7 @@ test('responsive team grid retains names, leader portrait and accessible small m
   const f = fixture(t), nav = f.host.querySelector('.team-photo-list');
   assert.equal(browser.getComputedStyle(nav).display, 'grid');
   for (const team of teams) {
-    const card = f.card(team.id); assert.equal(card.getAttribute('aria-haspopup'), 'dialog'); assert.equal(card.querySelector('.team-photo-name').textContent, team.name);
+    const card = f.card(team.id); assert.equal(card.getAttribute('aria-haspopup'), 'menu'); assert.equal(card.querySelector('.team-photo-name').textContent, team.name);
     assert.equal(card.querySelector('.team-leader-name').textContent, '에이전트 a');
     assert.equal(card.querySelector('.team-leader-portrait img').getAttribute('alt'), '에이전트 a 프로필 사진');
     assert.deepEqual([...card.querySelectorAll('.team-member-portrait')].map(node => node.getAttribute('aria-label')), ['에이전트 b 팀원','에이전트 c 팀원']);
