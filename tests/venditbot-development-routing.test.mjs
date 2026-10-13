@@ -80,9 +80,11 @@ test('one leader across teams captures independent project scope unaffected by l
   assert.deepEqual(f.store.getRun(runA.id).development, binding('project-a'));
 });
 
-test('completed context continues only inside its captured project, including leader default changes', async t => {
-  const f = await fixture(t), team = f.team('기본 연결 팀'), run = await f.start(team); await f.finish(run);
-  const same = await f.start(team, run.id); assert.equal(same.previousRunId, run.id); await f.finish(same);
+test('historical completed context continues only inside its captured project, including leader default changes', async t => {
+  const f = await fixture(t), team = f.team('기본 연결 팀'), run = await f.start(team);
+  // Historical pre-policy run: preserve its original completion semantics without granting new runs an exemption.
+  const historical=f.store.getRun(run.id);delete historical.requiredPolicy;f.store.saveRun(historical);await f.finish(run);
+  const same = await f.start(team, run.id); assert.equal(same.previousRunId, run.id); await f.finish(same);assert.equal(f.store.getRun(same.id).status,'failed');assert.match(f.store.getRun(same.id).error,/개발 완료는 미검증/);
   f.agents.save({...f.leader, development: binding('project-c')});
   const count = f.store.runCount(), sessions = f.sessions.size;
   await assert.rejects(f.start(team, run.id), /개발 프로젝트가 바뀌었습니다/);

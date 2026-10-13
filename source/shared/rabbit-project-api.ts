@@ -1,15 +1,17 @@
+import {playbookTemplateId, type PlaybookTemplateId} from './delegation-playbooks.js';
 /** Vendit Rabbit project-key contract, verified against server revision
  * 58a8f505bed0f3fa398c735e4750521221bfc04e. No owner-only operations. */
 export const RABBIT_WORKFLOW_TEMPLATES = ['feature_pr', 'bugfix_pr', 'review_only'] as const;
 export type RabbitWorkflowTemplate = typeof RABBIT_WORKFLOW_TEMPLATES[number];
 export type RabbitConnectionDraft = {name: string; baseUrl: string; projectId: string; repositoryId?: string; baseRef: string; workflowTemplate: RabbitWorkflowTemplate; maxParallelTasks: number; timeoutSeconds: number; enabledForAgents: boolean; preferForProjectTasks?: boolean; allowInsecureLoopback?: boolean};
 export type RabbitConnection = RabbitConnectionDraft & {id: string; createdAt: string; updatedAt: string};
-export type RabbitRunInput = {objective: string; repository_id?: string; base_ref: string; workflow_template: RabbitWorkflowTemplate; acceptance_criteria: string[]; attachments: []; constraints: {environment: 'development'; max_parallel_tasks: number; timeout_seconds: number; api_cost_limit_usd: 0}};
+export type RabbitRunInput = {playbook_template_id?: PlaybookTemplateId; objective: string; repository_id?: string; base_ref: string; workflow_template: RabbitWorkflowTemplate; acceptance_criteria: string[]; attachments: []; constraints: {environment: 'development'; max_parallel_tasks: number; timeout_seconds: number; api_cost_limit_usd: 0}};
 export type RabbitRepository = {id: string; provider: 'github'; url: string; default_branch: string; status: 'unverified' | 'ready' | 'revoked'};
 export type RabbitRepositoryPage = {items: RabbitRepository[]; next_cursor: string | null; has_more: boolean};
 export type RabbitConnectionTest = {projectId: string; repositories: RabbitRepository[]; pages: number; checkedAt: string};
-export type RabbitRunReceipt = {run_id: string; project_id: string; state: string; created_at: string; poll_url: string; events_url: string};
-export type RabbitRunDetail = {run_id: string; project_id: string; state: string; objective: string; block_reason: string | null; manifest_ready: boolean; created_at: string; run_revision: number; event_cursor: string; last_event_id: string | null; max_parallel_tasks: number; timeout_seconds: number; environment: string};
+export type RabbitExecutionManual = {required:{id:'delegation-loop-required';version:1;sha256:string};selected?:{id:PlaybookTemplateId;version:1;sha256:string}};
+export type RabbitRunReceipt = {execution_manual?:RabbitExecutionManual;run_id: string; project_id: string; state: string; created_at: string; poll_url: string; events_url: string};
+export type RabbitRunDetail = {execution_manual?:RabbitExecutionManual;run_id: string; project_id: string; state: string; objective: string; block_reason: string | null; manifest_ready: boolean; created_at: string; run_revision: number; event_cursor: string; last_event_id: string | null; max_parallel_tasks: number; timeout_seconds: number; environment: string};
 export type RabbitPublishedVerification = {version:1;status:'passed';verification_id:string;check_run_id:string;review_id:string;binding_sha256:string;candidate_sha256:string;repository_id:string;base_ref:string;base_sha:string;head_sha:string;validation_policy_sha256:string;command_manifest_sha256:string;tests:true;diff_reviewed:true;process_exit_confirmed:true};
 export type RabbitExecutionResult = {status: 'pr_opened' | 'no_changes' | 'failed' | 'plan_ready' | 'artifact_saved'; base_sha: string; summary: {exit_code: number; output_bytes: number; output_sha256: string; tests: 'unverified'; report?: {text: string; truncated: boolean}}; branch?: string; pr_url?: string; pr_number?: number; head_sha?: string; verification?: RabbitPublishedVerification};
 export type RabbitEventData = {message?: string; status?: string; reason?: string; task_id?: string | null; attempt_id?: string | null; result?: RabbitExecutionResult | null};
@@ -64,7 +66,7 @@ export function normalizeRabbitConnection(value: unknown): RabbitConnection {
   return {...draft, id: rabbitUuid(input.id), createdAt, updatedAt};
 }
 export function normalizeRabbitRunInput(value: unknown, connection?: RabbitConnectionDraft): RabbitRunInput {
-  const input = record(value); onlyKeys(input, ['objective', 'repository_id', 'base_ref', 'workflow_template', 'acceptance_criteria', 'attachments', 'constraints']);
+  const input = record(value); onlyKeys(input, ['objective', 'repository_id', 'base_ref', 'workflow_template', 'playbook_template_id', 'acceptance_criteria', 'attachments', 'constraints']);
   const objective = text(input.objective, 20000).trim();
   if (!Array.isArray(input.acceptance_criteria) || !input.acceptance_criteria.length || input.acceptance_criteria.length > 30) throw new Error('Rabbit 완료 기준은 1~30개가 필요합니다.');
   const acceptance_criteria = Array.from(input.acceptance_criteria, criterion => text(criterion, 2000).trim());
@@ -76,7 +78,7 @@ export function normalizeRabbitRunInput(value: unknown, connection?: RabbitConne
   const repository = input.repository_id ?? connection?.repositoryId;
   if (input.repository_id === null) throw new Error('Rabbit 저장소 ID는 null일 수 없습니다.');
   if (repository !== undefined) rabbitUuid(repository);
-  const result: RabbitRunInput = {objective, ...(repository !== undefined ? {repository_id: text(repository, 36)} : {}), base_ref: ref(input.base_ref === undefined ? connection?.baseRef ?? 'main' : input.base_ref), workflow_template: template(input.workflow_template === undefined ? connection?.workflowTemplate : input.workflow_template), acceptance_criteria, attachments: [],
+  const result: RabbitRunInput = {...(input.playbook_template_id === undefined ? {} : {playbook_template_id: playbookTemplateId(input.playbook_template_id)}), objective, ...(repository !== undefined ? {repository_id: text(repository, 36)} : {}), base_ref: ref(input.base_ref === undefined ? connection?.baseRef ?? 'main' : input.base_ref), workflow_template: template(input.workflow_template === undefined ? connection?.workflowTemplate : input.workflow_template), acceptance_criteria, attachments: [],
     constraints: {environment: 'development', max_parallel_tasks: integer(constraints.max_parallel_tasks === undefined ? connection?.maxParallelTasks : constraints.max_parallel_tasks, 1, 4), timeout_seconds: integer(constraints.timeout_seconds === undefined ? connection?.timeoutSeconds : constraints.timeout_seconds, 60, 14400), api_cost_limit_usd: 0}};
   if (new TextEncoder().encode(JSON.stringify(result)).byteLength > 65536) throw new Error('Rabbit 요청 전체가 서버의 64KiB 한도를 초과했습니다. 목표나 완료 기준을 줄이세요.');
   return result;
@@ -106,17 +108,27 @@ export function normalizeRabbitRepositoryPage(value: unknown): RabbitRepositoryP
   if (has_more ? !next_cursor || !items.length : next_cursor !== null) throw new Error('Rabbit 저장소 페이지 경계가 올바르지 않습니다.');
   return {items, has_more, next_cursor};
 }
+/** Remote policy pins are provenance metadata, never completion evidence. */
+export function executionManual(value:unknown): {execution_manual?:RabbitExecutionManual} {
+ if(value===undefined)return {};
+ const input=record(value),required=record(input.required);
+ const digest=(v:unknown)=>{if(typeof v!=='string'||!/^[a-f0-9]{64}$/.test(v))throw Error('Rabbit 실행 매뉴얼 해시를 확인하세요.');return v;};
+ if(required.id!=='delegation-loop-required'||required.version!==1)throw Error('Rabbit 필수 실행 매뉴얼을 확인하세요.');
+ const manual:RabbitExecutionManual={required:{id:'delegation-loop-required',version:1,sha256:digest(required.sha256)}};
+ if(input.selected!==undefined){const selected=record(input.selected),id=playbookTemplateId(selected.id);if(!id||selected.version!==1)throw Error('Rabbit 선택 실행 매뉴얼을 확인하세요.');manual.selected={id,version:1,sha256:digest(selected.sha256)};}
+ return {execution_manual:manual};
+}
 export function normalizeRabbitRunReceipt(value: unknown, connection: Pick<RabbitConnectionDraft, 'baseUrl' | 'projectId' | 'allowInsecureLoopback'>): RabbitRunReceipt {
   const input = record(value), run_id = rabbitUuid(input.run_id), project_id = scopedId(input.project_id, connection.projectId);
   const origin = importRabbitEndpoint(connection.baseUrl, connection).baseUrl;
   const checked = (value: unknown, suffix: string): string => {const url = endpointUrl(value, connection.allowInsecureLoopback); if (url.origin !== origin || url.pathname.toLowerCase() !== `/v1/runs/${run_id}${suffix}`) throw new Error('Rabbit 응답 주소가 설정한 서버 또는 작업과 다릅니다.'); return `${origin}/v1/runs/${run_id}${suffix}`;};
-  return {run_id, project_id, state: state(input.state), created_at: date(input.created_at), poll_url: checked(input.poll_url, ''), events_url: checked(input.events_url, '/events')};
+  return {...executionManual(input.execution_manual),run_id, project_id, state: state(input.state), created_at: date(input.created_at), poll_url: checked(input.poll_url, ''), events_url: checked(input.events_url, '/events')};
 }
 export function normalizeRabbitRunDetail(value: unknown, expected: {projectId: string; runId: string}): RabbitRunDetail {
   const input = record(value), run_id = scopedId(input.run_id, expected.runId), project_id = scopedId(input.project_id, expected.projectId);
   if (input.id !== undefined) scopedId(input.id, run_id);
   rabbitEventCursorSequence(input.event_cursor, run_id);
-  return {run_id, project_id, state: state(input.state), objective: text(input.objective, 20000), block_reason: input.block_reason === null ? null : text(input.block_reason, 2000), manifest_ready: boolean(input.manifest_ready), created_at: date(input.created_at), run_revision: integer(input.run_revision, 1, Number.MAX_SAFE_INTEGER), event_cursor: normalizeRabbitCursor(input.event_cursor), last_event_id: input.last_event_id === null ? null : rabbitUuid(input.last_event_id), max_parallel_tasks: integer(input.max_parallel_tasks, 1, 4), timeout_seconds: integer(input.timeout_seconds, 60, 14400), environment: state(input.environment)};
+  return {...executionManual(input.execution_manual),run_id, project_id, state: state(input.state), objective: text(input.objective, 20000), block_reason: input.block_reason === null ? null : text(input.block_reason, 2000), manifest_ready: boolean(input.manifest_ready), created_at: date(input.created_at), run_revision: integer(input.run_revision, 1, Number.MAX_SAFE_INTEGER), event_cursor: normalizeRabbitCursor(input.event_cursor), last_event_id: input.last_event_id === null ? null : rabbitUuid(input.last_event_id), max_parallel_tasks: integer(input.max_parallel_tasks, 1, 4), timeout_seconds: integer(input.timeout_seconds, 60, 14400), environment: state(input.environment)};
 }
 function executionResult(value: unknown): RabbitExecutionResult | null {
   if (value === null) return null;

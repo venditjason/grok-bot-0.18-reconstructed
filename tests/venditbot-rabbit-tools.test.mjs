@@ -31,3 +31,10 @@ test('run lookup is bound to the initiating conversation or same agent and same 
 test('abort while read approval is pending never calls network and cannot weaken the source binding',async()=>{
  const f=fixture();let release;f.port.authorizeRead=()=>new Promise(resolve=>{release=resolve;});const pending=f.tools.execute('list_project_connections',{},'pending');await new Promise(resolve=>setImmediate(resolve));f.controller.abort();release(true);await assert.rejects(pending,/중단/);assert.equal(f.calls.some(c=>c[0]==='repositories'),false);
 });
+
+test('selected manual is forwarded once and cannot be replaced by model input or changed on replay',async()=>{
+ const f=fixture();f.port.playbookTemplateId=()=> 'bug-improvement-loop';
+ const args={connectionId:f.enabled.id,input};const r=await f.tools.execute('start_project_run',args,'manual');assert.equal(r.request.playbook_template_id,'bug-improvement-loop');assert.equal(r.request.workflow_template,'review_only');
+ f.port.playbookTemplateId=()=> 'repeatable-task-manual';assert.deepEqual(await f.tools.execute('start_project_run',args,'manual'),r);assert.equal(f.calls.filter(x=>x[0]==='start').length,1);
+ await assert.rejects(f.tools.execute('start_project_run',{connectionId:f.enabled.id,input:{...input,playbook_template_id:'evidence-development'}},'override'),/바꿀 수 없습니다/);assert.equal(f.calls.filter(x=>x[0]==='start').length,1);
+});

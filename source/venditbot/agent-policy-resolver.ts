@@ -1,3 +1,4 @@
+import {pinPlaybook} from '../shared/delegation-playbooks.js';
 import {classifyPolicyTask, normalizeAgentPolicy, normalizePolicyConnections, type AgentPolicy, type AgentPolicySelection, type PolicyConnectionRoute, type TaskKind} from '../shared/agent-policy.js';
 import {selectProviderModel, type ProviderModel} from '../shared/provider-model-catalog.js';
 
@@ -21,7 +22,7 @@ export function resolveAgentPolicy(options: ResolveAgentPolicyOptions): AgentPol
   const original = normalizePolicyConnections(options.originalConnections);
   const classification = classifyPolicyTask(policy, options.text, options.taskKind);
   const rule = policy.rules.find(rule => rule.taskKind === classification.taskKind)!;
-  const metadata = {...classification, policyId: policy.id, policyName: policy.name, policyUpdatedAt: policy.updatedAt, ...(rule.efficiency ? {efficiency: structuredClone(rule.efficiency)} : {})};
+  const metadata = {...classification, ...(policy.playbookTemplateId ? {playbook: pinPlaybook(policy.playbookTemplateId)} : {}), policyId: policy.id, policyName: policy.name, policyUpdatedAt: policy.updatedAt, ...(rule.efficiency ? {efficiency: structuredClone(rule.efficiency)} : {})};
   const allowed = new Set(original.map(route => route.connectionId));
   const validate = (routes: readonly PolicyConnectionRoute[]): PolicyConnectionRoute[] => {
     const selected = normalizePolicyConnections(routes).map(route => {

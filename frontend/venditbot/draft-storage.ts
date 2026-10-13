@@ -1,6 +1,7 @@
 import {validDevelopmentBinding} from '../../source/shared/development-routing';
 import { ACTION_RULE_CATEGORIES, type ActionRules } from '../../source/shared/action-rules';
 import { normalizePolicyEfficiency, type AgentPolicyDraft } from '../../source/shared/agent-policy';
+import {playbookTemplateId} from '../../source/shared/delegation-playbooks';
 import type * as ReactTypes from 'react';
 import type { AgentDraft, TeamDraft } from './ui-state';
 const React: typeof ReactTypes = window.React;
@@ -29,6 +30,7 @@ export function agentEditDrafts(value: unknown): Record<string, AgentEditDraft> 
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
+    try { if (d.playbookTemplateId !== undefined) playbookTemplateId(d.playbookTemplateId); } catch { return; }
     if (d.development !== undefined && !validDevelopmentBinding(d.development)) return;
     if (!string(d.name, 80) || !string(d.instructions, 16000) || !string(d.connectionId, 200) || !string(d.model, 200) || !optional(d.id, 100) || !optional(d.effort, 40) || !optional(d.avatarId, 100) || !optional(d.workspacePath, 4096) || !optional(record.avatarOwnerKey, 120) || !optional(record.avatarRequestId, 100) || !optional(record.avatarAppliedRequestId, 100) || !string(record.avatarPrompt, 4000) || (record.avatarMode !== undefined && record.avatarMode !== 'image' && record.avatarMode !== 'illustration')) return;
     if (d.automation !== undefined && (!object(d.automation) || !string(d.automation.policyId, 100))) return;
@@ -49,6 +51,7 @@ export function teamEditDrafts(value: unknown): Record<string, TeamEditDraft> | 
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
+    try { if (d.playbookTemplateId !== undefined) playbookTemplateId(d.playbookTemplateId); } catch { return; }
     if (d.development !== undefined && !validDevelopmentBinding(d.development)) return;
     if (!string(d.name, 80) || !string(d.instructions, 16000) || !optional(d.id, 100) || !optional(d.topic, 4000) || !optional(d.policies, 16000) || !optional(d.leaderAgentId, 100) || !optional(d.projectBrief, 4000) || !optional(d.workspacePath, 4096) || !optional(d.requestId, 100) || (d.leaderMode !== undefined && d.leaderMode !== 'existing' && d.leaderMode !== 'automatic') || (d.autonomous !== undefined && typeof d.autonomous !== 'boolean') || !Array.isArray(d.memberAgentIds) || d.memberAgentIds.some(id => !string(id, 100)) || !string(record.expectedUpdatedAt, 40)) return;
     const draft: TeamDraft = { name: d.name, instructions: d.instructions, memberAgentIds: [...d.memberAgentIds] as string[], rounds: 1 };
@@ -148,6 +151,7 @@ export function policyEditDrafts(value: unknown): Record<string, PolicyEditDraft
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
+    try { if (d.playbookTemplateId !== undefined) playbookTemplateId(d.playbookTemplateId); } catch { return; }
     if (!optional(d.id, 100) || !string(d.name, 80) || !string(d.description, 2000) || !['routine', 'standard', 'complex'].includes(String(d.defaultTaskKind)) || !Array.isArray(d.rules) || d.rules.length !== 3 || !string(record.expectedUpdatedAt, 40) || !string(record.previewAgentId, 100) || !string(record.previewText, 8000)) return;
     if (new Set(d.rules.map(rule => object(rule) ? rule.taskKind : '')).size !== 3) return;
     const rules = [];
@@ -157,7 +161,7 @@ export function policyEditDrafts(value: unknown): Record<string, PolicyEditDraft
       try { if (rule.efficiency !== undefined) efficiency = normalizePolicyEfficiency(rule.efficiency); } catch { return; }
       rules.push({ taskKind: rule.taskKind, keywords: [...rule.keywords], connections: rule.connections.map(route => ({ connectionId: route.connectionId, model: route.model, ...(route.effort ? { effort: route.effort } : {}) })), ...(efficiency ? { efficiency } : {}) });
     }
-    result[key] = { draft: { ...(d.id ? { id: d.id } : {}), name: d.name, description: d.description, defaultTaskKind: d.defaultTaskKind, rules }, expectedUpdatedAt: record.expectedUpdatedAt, previewAgentId: record.previewAgentId, previewText: record.previewText } as PolicyEditDraft;
+    result[key] = { draft: { ...(d.id ? { id: d.id } : {}), ...(d.playbookTemplateId ? {playbookTemplateId: d.playbookTemplateId} : {}), name: d.name, description: d.description, defaultTaskKind: d.defaultTaskKind, rules }, expectedUpdatedAt: record.expectedUpdatedAt, previewAgentId: record.previewAgentId, previewText: record.previewText } as PolicyEditDraft;
   }
   return result;
 }
@@ -180,8 +184,9 @@ export function rabbitEditDrafts(value: unknown): Record<string, import('./rabbi
   for (const [key, record] of Object.entries(value)) {
     if (!validKey(key) || !object(record) || !object(record.draft)) return;
     const d = record.draft;
+    try { if (d.playbookTemplateId !== undefined) playbookTemplateId(d.playbookTemplateId); } catch { return; }
     if (!optional(d.id, 100) || !string(d.name, 80) || !string(d.baseUrl, 4096) || !string(d.projectId, 100) || !optional(d.repositoryId, 100) || !string(d.baseRef, 240) || !['feature_pr', 'bugfix_pr', 'review_only'].includes(String(d.workflowTemplate)) || !Number.isInteger(d.maxParallelTasks) || Number(d.maxParallelTasks) < 1 || Number(d.maxParallelTasks) > 4 || !Number.isInteger(d.timeoutSeconds) || Number(d.timeoutSeconds) < 0 || Number(d.timeoutSeconds) > 14400 || typeof d.enabledForAgents !== 'boolean' || (d.preferForProjectTasks !== undefined && typeof d.preferForProjectTasks !== 'boolean') || !string(record.endpoint, 4096) || !string(record.expectedUpdatedAt, 40)) return;
-    result[key] = { draft: { ...(d.id ? { id: d.id } : {}), name: d.name, baseUrl: d.baseUrl, projectId: d.projectId, ...(d.repositoryId ? { repositoryId: d.repositoryId } : {}), baseRef: d.baseRef, workflowTemplate: d.workflowTemplate, maxParallelTasks: d.maxParallelTasks, timeoutSeconds: d.timeoutSeconds, enabledForAgents: d.enabledForAgents, ...(d.preferForProjectTasks === undefined ? {} : { preferForProjectTasks: d.preferForProjectTasks }), ...(d.allowInsecureLoopback === true ? { allowInsecureLoopback: true } : {}) }, endpoint: record.endpoint, expectedUpdatedAt: record.expectedUpdatedAt } as import('./rabbit-ui-state').RabbitEditDraft;
+    result[key] = { draft: { ...(d.id ? { id: d.id } : {}), ...(d.playbookTemplateId ? {playbookTemplateId: d.playbookTemplateId} : {}), name: d.name, baseUrl: d.baseUrl, projectId: d.projectId, ...(d.repositoryId ? { repositoryId: d.repositoryId } : {}), baseRef: d.baseRef, workflowTemplate: d.workflowTemplate, maxParallelTasks: d.maxParallelTasks, timeoutSeconds: d.timeoutSeconds, enabledForAgents: d.enabledForAgents, ...(d.preferForProjectTasks === undefined ? {} : { preferForProjectTasks: d.preferForProjectTasks }), ...(d.allowInsecureLoopback === true ? { allowInsecureLoopback: true } : {}) }, endpoint: record.endpoint, expectedUpdatedAt: record.expectedUpdatedAt } as import('./rabbit-ui-state').RabbitEditDraft;
   }
   return result;
 }

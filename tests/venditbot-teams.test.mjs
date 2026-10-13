@@ -1,3 +1,4 @@
+import {withSuccessfulFileReceiptFixtures} from './fixtures/delegation-receipts.mjs';
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {mkdtemp, readFile, writeFile, rm, rename, mkdir, stat, symlink, link} from 'node:fs/promises';
@@ -7,7 +8,8 @@ import {setImmediate as tick} from 'node:timers/promises';
 import test from 'node:test';
 import {build} from 'esbuild';
 const built = await build({stdin: {contents: "export * from './source/venditbot/team-store.ts'; export * from './source/venditbot/team-coordinator.ts'; export * from './source/venditbot/task-queue.ts'; export * from './source/venditbot/agent-store.ts';", resolveDir: process.cwd()}, bundle: true, platform: 'node', format: 'esm', write: false});
-const {TeamStore, TeamCoordinator, TaskQueue, AgentStore} = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+const {TeamStore, TeamCoordinator: RawTeamCoordinator, TaskQueue, AgentStore} = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
+const TeamCoordinator=withSuccessfulFileReceiptFixtures(RawTeamCoordinator);
 const input = {name: '대표', instructions: '목표를 분석하고 배분하세요.', connectionId: 'local-api', model: 'qa-model'};
 const defer = () => {let resolve; const promise = new Promise(done => {resolve = done;}); return {promise, resolve};};
 async function fixture(t) {
@@ -112,7 +114,7 @@ test('delegations cap at eight, planning caps at three and final summary has no 
     await assert.rejects(f.tools().execute('remove_team_member', {agentId: f.worker.id}, `remove-${cycle}`), /끝나지/);
     await f.finish('계획'); for (let i = 0; i < count; i++) await f.finish('작업 결과');
   }
-  assert.equal(f.store.getRun(run.id).steps.at(-1).kind, 'summary'); assert.deepEqual(f.tools().definitions.map(tool => tool.name).sort(), ['list_team_members', 'read_team_messages', 'read_team_task', 'send_team_message']);
+  assert.equal(f.store.getRun(run.id).steps.at(-1).kind, 'summary'); assert.deepEqual(f.tools().definitions.map(tool => tool.name).sort(), ['accept_team_result', 'list_team_members', 'read_team_messages', 'read_team_task', 'send_team_message']);
   await f.finish('최종 종합'); assert.equal(f.store.getRun(run.id).steps.length, 12); assert.equal(f.coordinator.detail(run.id).status, 'completed');
 });
 

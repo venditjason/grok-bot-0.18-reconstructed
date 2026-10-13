@@ -1,3 +1,4 @@
+import {withSuccessfulFileReceiptFixtures} from './fixtures/delegation-receipts.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {mkdtemp, rm, rename, mkdir, readFile} from 'node:fs/promises';
@@ -6,7 +7,8 @@ import {join} from 'node:path';
 import {setImmediate as tick} from 'node:timers/promises';
 import {build} from 'esbuild';
 const built = await build({stdin: {contents: "export * from './source/venditbot/team-store.ts'; export * from './source/venditbot/team-coordinator.ts';", resolveDir: process.cwd()}, bundle: true, platform: 'node', format: 'esm', write: false});
-const {TeamStore, TeamCoordinator} = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'));
+const {TeamStore, TeamCoordinator: RawTeamCoordinator} = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'));
+const TeamCoordinator=withSuccessfulFileReceiptFixtures(RawTeamCoordinator);
 const stamp = '2026-10-11T01:00:00.000Z';
 const agent = (id, name) => ({id, name, instructions: '원래 역할 ' + id, connectionId: 'codex', model: 'gpt-6-luna', createdAt: stamp, updatedAt: stamp});
 async function fixture(t) {

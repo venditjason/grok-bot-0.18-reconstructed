@@ -1,3 +1,4 @@
+import {validRequiredPolicy, validActionReceipt, type RequiredPolicyPin, type ActionReceipt} from '../shared/required-delegation-policy.js';
 import {validChatAttachments,type ChatAttachment} from '../shared/chat-attachments.js';
 import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
 import {SecureStorageError} from './secure-storage-error.js';
@@ -10,8 +11,8 @@ export type ToolRecord = { callId: string; name: string; path?: string; status: 
 export type ConnectionRoute = { connectionId: string; model: string; effort?: string };
 export type ConnectionAttempt = ConnectionRoute & { status: 'running' | 'failed' | 'completed'; error?: string };
 export type AvatarRequestRecord = {requestId: string; ownerKey: string; sessionId?: string; phase: 'validating' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; assetId?: string; error?: string};
-export type ChatMessage = { attachments?: ChatAttachment[]; id: string; role: 'user' | 'assistant'; text: string; createdAt: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; tools?: ToolRecord[]; attempts?: ConnectionAttempt[]; routeSelection?: AgentPolicySelection };
-export type ChatSession = { queuedAttachments?:ChatAttachment[]; routineDispatchId?: string; development?: DevelopmentBinding; id: string; title: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; agentId?: string; agentName?: string; instructions?: string; teamRunId?: string; teamStepIndex?: number; purpose?: 'avatar'; avatarRequest?: AvatarRequestRecord; automation?: {policyId: string}; policySnapshot?: AgentPolicy; policyAllowedConnections?: ConnectionRoute[]; policyTaskText?: string; routeSelection?: AgentPolicySelection; taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; queuedPrompt?: string; createdAt: string; updatedAt: string; workspacePath?: string; providerSessionId?: string; providerSessionBinding?: string; messages: ChatMessage[] };
+export type ChatMessage = { requiredPolicy?: RequiredPolicyPin; actionReceipt?: ActionReceipt; attachments?: ChatAttachment[]; id: string; role: 'user' | 'assistant'; text: string; createdAt: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; tools?: ToolRecord[]; attempts?: ConnectionAttempt[]; routeSelection?: AgentPolicySelection };
+export type ChatSession = { requiredPolicy?: RequiredPolicyPin; queuedAttachments?:ChatAttachment[]; routineDispatchId?: string; development?: DevelopmentBinding; id: string; title: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; agentId?: string; agentName?: string; instructions?: string; teamRunId?: string; teamStepIndex?: number; purpose?: 'avatar'; avatarRequest?: AvatarRequestRecord; automation?: {policyId: string}; policySnapshot?: AgentPolicy; policyAllowedConnections?: ConnectionRoute[]; policyTaskText?: string; routeSelection?: AgentPolicySelection; taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; queuedPrompt?: string; createdAt: string; updatedAt: string; workspacePath?: string; providerSessionId?: string; providerSessionBinding?: string; messages: ChatMessage[] };
 
 export function validPolicySnapshot(value: unknown): value is AgentPolicy {try {normalizeAgentPolicy(value); return true;} catch {return false;}}
 export function validAvatarRequest(value: unknown): value is AvatarRequestRecord {
@@ -39,7 +40,7 @@ function date(value: unknown): boolean { return text(value, 40) && Number.isFini
 function validSession(value: unknown): value is ChatSession {
   if (!value || typeof value !== 'object') return false;
   const s = value as ChatSession;
-  return (s.queuedAttachments===undefined||validChatAttachments(s.queuedAttachments)) && (s.routineDispatchId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s.routineDispatchId)) && (s.development === undefined || validDevelopmentBinding(s.development)) && text(s.id, 100) && text(s.title, 200) && text(s.connectionId, 200) && text(s.model, 200) && date(s.createdAt) && date(s.updatedAt)
+  return (s.requiredPolicy===undefined||validRequiredPolicy(s.requiredPolicy)) && (s.queuedAttachments===undefined||validChatAttachments(s.queuedAttachments)) && (s.routineDispatchId === undefined || /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s.routineDispatchId)) && (s.development === undefined || validDevelopmentBinding(s.development)) && text(s.id, 100) && text(s.title, 200) && text(s.connectionId, 200) && text(s.model, 200) && date(s.createdAt) && date(s.updatedAt)
     && (s.effort === undefined || text(s.effort, 40)) && (s.workspacePath === undefined || text(s.workspacePath, 4096)) && (s.providerSessionId === undefined || text(s.providerSessionId, 200))
     && (s.connections === undefined || validConnections(s.connections)) && (s.providerSessionBinding === undefined || text(s.providerSessionBinding, 500))
     && (s.agentId === undefined || text(s.agentId, 100)) && (s.agentName === undefined || text(s.agentName, 80)) && (s.instructions === undefined || text(s.instructions, 16000))
@@ -51,7 +52,7 @@ function validSession(value: unknown): value is ChatSession {
     && (s.routeSelection === undefined || validAgentPolicySelection(s.routeSelection))
     && (s.taskStatus === undefined || ['queued', 'running', 'completed', 'failed', 'cancelled'].includes(s.taskStatus)) && (s.queuedPrompt === undefined || text(s.queuedPrompt, 500_000))
     && Array.isArray(s.messages) && s.messages.length <= 20_000 && new Set(s.messages.map(m => m?.id)).size === s.messages.length
-    && s.messages.every(m => m && (m.attachments===undefined||validChatAttachments(m.attachments)) && text(m.id, 100) && ['user', 'assistant'].includes(m.role) && text(m.text, 2_000_000) && date(m.createdAt)
+    && s.messages.every(m => m && (m.requiredPolicy===undefined||validRequiredPolicy(m.requiredPolicy)) && (m.actionReceipt===undefined||validActionReceipt(m.actionReceipt)) && (m.attachments===undefined||validChatAttachments(m.attachments)) && text(m.id, 100) && ['user', 'assistant'].includes(m.role) && text(m.text, 2_000_000) && date(m.createdAt)
       && ['running', 'completed', 'failed', 'cancelled'].includes(m.status) && (m.error === undefined || text(m.error, 2000))
       && (m.routeSelection === undefined || validAgentPolicySelection(m.routeSelection))
       && (m.attempts === undefined || (Array.isArray(m.attempts) && m.attempts.length > 0 && m.attempts.length <= 8 && m.attempts.every(a => validConnectionRoute(a) && ['running', 'failed', 'completed'].includes(a.status) && (a.error === undefined || text(a.error, 2000)))))
@@ -102,7 +103,7 @@ export class LocalSessionStore {
   }
   list(): ChatSession[] { return structuredClone(this.sessions); }
   get(id: string): ChatSession { const session = this.sessions.find(s => s.id === id); if (!session) throw new Error('대화를 찾을 수 없습니다.'); return structuredClone(session); }
-  create(connectionId: string, model: string, workspacePath?: string, effort?: string, snapshot?: Pick<ChatSession, 'routineDispatchId' | 'connections' | 'agentId' | 'agentName' | 'instructions' | 'purpose' | 'avatarRequest' | 'automation' | 'policySnapshot' | 'policyAllowedConnections' | 'development'>): ChatSession {
+  create(connectionId: string, model: string, workspacePath?: string, effort?: string, snapshot?: Pick<ChatSession, 'requiredPolicy' | 'routineDispatchId' | 'connections' | 'agentId' | 'agentName' | 'instructions' | 'purpose' | 'avatarRequest' | 'automation' | 'policySnapshot' | 'policyAllowedConnections' | 'development'>): ChatSession {
     if (this.sessions.length >= 1000) throw new Error('대화는 최대 1,000개까지 저장할 수 있습니다. 이전 대화를 내보낸 뒤 삭제하세요.');
     const now = new Date().toISOString();
     const session: ChatSession = { ...structuredClone(snapshot), id: randomUUID(), title: '새 대화', connectionId, model, ...(effort ? {effort} : {}), ...(workspacePath ? {workspacePath} : {}), createdAt: now, updatedAt: now, messages: [] };

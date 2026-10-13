@@ -1,3 +1,4 @@
+import {delegatedRabbitIntent} from './rabbit-delegation.js';
 import {WebTools,WEB_TOOL_POLICY,wantsNativeWebSearch,nativeWebInstructions} from './web-tools.js';
 import type {NativeWebSearchEvent} from '../shared/node/native-web-events.js';
 import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell, dialog, nativeImage } from 'electron';
@@ -49,6 +50,9 @@ import {AgentManagementTools} from './agent-management-tools.js';
 import {ActionRulesStore} from './action-rules-store.js';
 import {RabbitStore} from './rabbit-store.js';
 import {RabbitHost} from './rabbit-host.js';
+import {REQUIRED_POLICY, REQUIRED_POLICY_INSTRUCTIONS} from '../shared/required-delegation-policy.js';
+import {actionReceipt} from './delegation-evidence.js';
+import {playbookInstructions} from '../shared/delegation-playbooks.js';
 import {RabbitTools} from './rabbit-tools.js';
 import {normalizeRabbitConnectionDraft} from '../shared/rabbit-project-api.js';
 import {evaluateActionRules} from '../shared/action-rules.js';
@@ -196,11 +200,17 @@ teams = new TeamCoordinator(teamStore, {
       const policy = run.policySnapshots?.find(p => p.agentId === member.id)?.policy;
       return [{id: step.sessionId, title: `${run.teamName} · ${member.name} · ${step.kind === 'summary' ? '최종 종합' : step.kind === 'plan' ? `${step.round}차 계획` : '위임 작업'}`.slice(0, 200), ...first, connections,
         ...(run.development ? {development: structuredClone(run.development)} : {}),
-        agentId: member.id, agentName: member.name, instructions: member.instructions, ...(member.workspacePath ? {workspacePath: member.workspacePath} : {}), teamRunId: run.id, teamStepIndex: index,
+        ...(run.requiredPolicy ? {requiredPolicy: structuredClone(run.requiredPolicy)} : {}), agentId: member.id, agentName: member.name, instructions: member.instructions, ...(member.workspacePath ? {workspacePath: member.workspacePath} : {}), teamRunId: run.id, teamStepIndex: index,
         ...(step.routeSelection ? {routeSelection: step.routeSelection} : policy && !step.connections ? {policySnapshot: policy, policyAllowedConnections: connectionRoutes(member), policyTaskText: run.goal} : {}),
         createdAt: run.createdAt, updatedAt: run.createdAt, messages: []}];
     });
     if (prepared.length) sessions.createPrepared(prepared);
+  },
+  verifyRabbit: (sessionId,contract,signal) => rabbit.verifyDelegation(readSession(sessionId),contract,signal),
+  artifactMatches: (sessionId,path,sha256) => {
+    const session=readSession(sessionId);
+    if(!session.workspacePath)return false;
+    return new WorkspaceExecutor(session.workspacePath,async()=>false).matchesFileContent(path,sha256);
   },
   enqueue: enqueueSession, cancelSession, getSession: readSession, queueState: () => taskQueue.state(), changed: run => {emit({type: 'team-run', run}); routineHost?.teamChanged(run);},
   listAgents: () => agents.list(), listModels: listTeamModels, resolveDelegation, cloneAgent: (template, changes) => {
@@ -332,6 +342,7 @@ function enqueueSession(sessionId: string, text: string, hooks?: {started(): voi
   const session = readSession(sessionId), queue = taskQueue.state();
   if (queue.running.includes(sessionId) || queue.queued.includes(sessionId)) throw new Error('이 작업은 이미 실행 중이거나 대기 중입니다.');
   if (queue.queued.length >= 16) throw new Error('대기 작업은 최대 16개입니다. 기존 작업을 마치거나 중단하세요.');
+  if (!session.teamRunId && session.purpose !== 'avatar') session.requiredPolicy = {...REQUIRED_POLICY};
   if (session.automation && !session.teamRunId) session.policySnapshot = policies.get(session.automation.policyId);
   const queuedAttachments=attachments ?? (session.teamRunId ? teams.attachmentsFor(sessionId) : []);if(queuedAttachments.length)session.queuedAttachments=queuedAttachments;else delete session.queuedAttachments; session.taskStatus = 'queued'; session.queuedPrompt = text; saveSession(session); emit({type: 'session', session});
   if (hooks) jobHooks.set(sessionId, hooks);
@@ -532,7 +543,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
   session.taskStatus = 'running'; delete session.queuedPrompt;
   const now = new Date().toISOString();
   const user: ChatMessage = {...(attachments?.length?{attachments}:{}), id: randomUUID(), role: 'user', text, createdAt: now, status: 'completed' };
-  const answer: ChatMessage = { id: randomUUID(), role: 'assistant', text: '', createdAt: now, status: 'running' };
+  const answer: ChatMessage = { ...(session.requiredPolicy ? {requiredPolicy: structuredClone(session.requiredPolicy)} : {}), id: randomUUID(), role: 'assistant', text: '', createdAt: now, status: 'running' };
   session.messages.push(user, answer);
   if (session.messages.length === 2 && !session.teamRunId) session.title = text.replace(/\s+/g, ' ').slice(0, 45);
   saveSession(session); emit({ type: 'session', session });
@@ -553,9 +564,16 @@ async function run(sessionId: string, text: string, controller: AbortController)
   const boundRecords = session.development ? rabbitStore.listRuns().filter(record => record.connectionId === session.development!.connectionId && record.source && (record.source.sessionId === sessionId || !!session.teamRunId && record.source.teamRunId === session.teamRunId && record.source.agentId === session.agentId)).map(record => ({id: record.id, phase: record.phase, state: record.detail?.state})).slice(0,100) : [];
   const projectInstructions = session.agentId && session.purpose !== 'avatar' ? (session.development ? `${developmentInstructions(session.development)}\n기존 원격 실행 기록(새 요청으로 반복하지 마세요): ${JSON.stringify(boundRecords)}` : rabbit.instructions(projectTaskText(), projectSource)) : '';
   let systemInstructions = [session.instructions, session.purpose !== 'avatar' ? WEB_TOOL_POLICY : '', session.agentId && session.purpose !== 'avatar' ? FEEDBACK_TOOL_POLICY : '', session.workspacePath && session.purpose !== 'avatar' ? WORKSPACE_DEVELOPMENT_POLICY : '', projectInstructions].filter(Boolean).join('\n\n');
+  const delegatedWrite = (request: ActionApprovalRequest) => {
+    if(request.operation!=='write'||!session.teamRunId)return;
+    const run=teams.sessionRun(sessionId),step=run?.steps.find(s=>s.sessionId===sessionId);
+    if(run?.requiredPolicy && step?.kind==='work' && (!step.contract || step.contract.acceptance.kind!=='file_write_sha256' || step.contract.acceptance.path!==request.path || !step.contract.ownedFiles.includes(request.path)))throw Error('위임의 읽기 전용·파일 소유권 수용 계약 밖의 쓰기입니다.');
+  };
   const authorizeWorkspace = async (request: ActionApprovalRequest) => {
+    delegatedWrite(request);
     if (request.operation === 'write') {assertDevelopmentWriteAllowed(session.development); rabbit.assertLocalWrite(projectTaskText(), projectSource);}
     const allowed = await authorize(request);
+    delegatedWrite(request);
     if (request.operation === 'write') {assertDevelopmentWriteAllowed(session.development); rabbit.assertLocalWrite(projectTaskText(), projectSource);}
     return allowed;
   };
@@ -563,9 +581,14 @@ async function run(sessionId: string, text: string, controller: AbortController)
   const teamTools = teams.tools(sessionId, controller.signal);
   const currentAgent = session.agentId && !session.teamRunId ? agents.list().find(a => a.id === session.agentId) : undefined;
   const projectTools = session.agentId && session.purpose !== 'avatar' ? new RabbitTools({
+    playbookTemplateId: () => answer.routeSelection?.playbook?.id,
     connections: () => rabbit.connections().filter(c => c.hasKey && (!session.development || c.id === session.development.connectionId)),
     repositories: connection => rabbit.test(connection, controller.signal, true),
-    start: (connection, input, requestId, source) => rabbit.start(connection.id, input, requestId, source, controller.signal),
+    start: (connection, input, requestId, source) => {
+      const team=teams.sessionRun(sessionId),step=team?.steps.find(s=>s.sessionId===sessionId);
+      if(team?.requiredPolicy){if(step?.kind!=='work')throw Error('대표는 원격 개발을 수용 계약으로 자식에게 위임하세요. 별도 원격 접수는 허용하지 않습니다.');if(step.contract?.acceptance.kind!=='rabbit_verified_pr')throw Error('위임 계약에 원격 개발 접수가 없습니다.');const intent=delegatedRabbitIntent(step.contract,source,connection.id,input);return rabbit.start(connection.id,input,intent.id,intent.source,controller.signal);}
+      return rabbit.start(connection.id,input,requestId,source,controller.signal);
+    },
     getRecord: id => rabbitStore.getRun(id), refresh: record => rabbit.refresh(record.id, controller.signal, true),
     authorizeRead: tool => authorize({path: '.', operation: 'read', tool, category: 'routine'}),
   }, {sessionId, agentId: session.agentId, ...(session.teamRunId ? {teamRunId: session.teamRunId} : {})}, controller.signal) : undefined;
@@ -661,6 +684,8 @@ async function run(sessionId: string, text: string, controller: AbortController)
       const first = chosen.connections[0]!; session.connectionId = first.connectionId; session.model = first.model; if (first.effort) session.effort = first.effort; else delete session.effort;
       persist(); emit({type: 'session', session});
     } else if (session.routeSelection) answer.routeSelection = structuredClone(session.routeSelection);
+    if (session.purpose !== 'avatar' && answer.routeSelection?.playbook) systemInstructions = [systemInstructions, playbookInstructions(answer.routeSelection.playbook)].join('\n\n');
+    if (answer.requiredPolicy) systemInstructions = [systemInstructions, REQUIRED_POLICY_INSTRUCTIONS].join('\n\n');
     const efficiency = session.routeSelection?.efficiency;
     let omittedPolicyTurns = 0;
     if (efficiency) {
@@ -679,6 +704,8 @@ async function run(sessionId: string, text: string, controller: AbortController)
     if(JSON.stringify(history).length>24*1024*1024)throw Error('첨부 문맥이 너무 큽니다. 새 대화에서 필요한 파일만 첨부해 주세요.');
     if (session.workspacePath) executor = new WorkspaceExecutor(session.workspacePath, approve, controller.signal, authorizeWorkspace);
     const tools = [...(webTools?.definitions ?? []), ...(appFeedbackTools?.definitions ?? []), ...(executor ? WORKSPACE_TOOLS : []), ...(teamTools?.definitions ?? []), ...(agentTools?.definitions ?? []), ...(projectTools?.definitions ?? []), ...(routineTools?.definitions ?? []), ...(connectorTools?.definitions ?? [])];
+    const previousAnswer=session.messages.slice(0,-2).findLast(message=>message.role==='assistant');
+    const pinnedInstructionsChanged=!!session.providerSessionId && (JSON.stringify(previousAnswer?.requiredPolicy??null)!==JSON.stringify(answer.requiredPolicy??null) || JSON.stringify(previousAnswer?.routeSelection?.playbook??null)!==JSON.stringify(answer.routeSelection?.playbook??null));
     const routes = connectionRoutes(session);
     let nativeWebPermission:boolean|undefined;
     for (const [index, route] of routes.entries()) {
@@ -716,13 +743,13 @@ async function run(sessionId: string, text: string, controller: AbortController)
           const priorBinding = session.providerSessionBinding ?? (session.connectionId === 'claude-code' ? connectionRouteKey(session) : undefined);
           if (priorBinding !== connectionRouteKey(route)) { delete session.providerSessionId; delete session.providerSessionBinding; }
           // A native resume would restore omitted history and bypass the opt-in budget.
-          const previous = efficiency ? undefined : session.providerSessionId;
+          const previous = efficiency || pinnedInstructionsChanged ? undefined : session.providerSessionId;
           resumeParent = previous;
           if (tools.length) {
             try { mcp = await startMcpGateway((name, args, id) => executeAttempt({name}, args, id), attemptController.signal, tools); }
             catch (error) { localFailure = true; throw error; }
           }
-          for await (const event of runClaudeTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), systemInstructions:routeInstructions, nativeWebSearch, ...(previous ? {sessionId: previous} : {}), ...(!previous && (routes.length > 1 || efficiency || session.messages.some(message => message.routeSelection?.efficiency)) ? {historyHandoff: true} : {}), ...(mcp ? {mcpServer: {url: mcp.url, token: mcp.token}} : {}), signal: attemptController.signal })) {
+          for await (const event of runClaudeTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), systemInstructions:routeInstructions, nativeWebSearch, ...(previous ? {sessionId: previous} : {}), ...(!previous && (routes.length > 1 || efficiency || pinnedInstructionsChanged || session.messages.some(message => message.routeSelection?.efficiency)) ? {historyHandoff: true} : {}), ...(mcp ? {mcpServer: {url: mcp.url, token: mcp.token}} : {}), signal: attemptController.signal })) {
             if (event.type === 'text-delta') addText(event.delta);
             if (event.type === 'native-web-search') {toolInvoked=true;nativeToolEvent(route.connectionId,event);}
             if (event.type === 'done') { completed = true; if (!answer.text) addText(event.text); nextProviderSessionId = event.sessionId; local(() => settings.recordInferenceUsage('claude-code', event.usage)); }
@@ -776,6 +803,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
     session.taskStatus = answer.status === 'running' ? 'failed' : answer.status;
     for (const tool of answer.tools ?? []) if (tool.status === 'running') { tool.status = 'failed'; tool.summary = '응답 종료로 도구 실행이 중단되었습니다.'; }
     for (const attempt of answer.attempts ?? []) if (attempt.status === 'running') { attempt.status = 'failed'; attempt.error = answer.error ?? '응답이 종료되었습니다.'; }
+    if (answer.requiredPolicy) { answer.actionReceipt = actionReceipt(answer.tools); if (answer.status === 'completed' && answer.actionReceipt.status === 'failed') {answer.status='failed';answer.error=answer.actionReceipt.reason;session.taskStatus='failed';} }
     let cleanupError: string | undefined;
     try { saveSession(session); } catch (error) { cleanupError = `대화를 저장하지 못했습니다. 종료 전에 내보내기로 보관하세요. ${safeError(error)}`; }
     finally {

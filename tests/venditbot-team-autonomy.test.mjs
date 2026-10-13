@@ -1,3 +1,4 @@
+import {withSuccessfulFileReceiptFixtures} from './fixtures/delegation-receipts.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {mkdtemp,readFile,writeFile,rename,mkdir,rm} from 'node:fs/promises';
@@ -7,7 +8,8 @@ import {randomUUID} from 'node:crypto';
 import {setImmediate as tick} from 'node:timers/promises';
 import {build} from 'esbuild';
 const built=await build({stdin:{contents:"export * from './source/venditbot/team-store.ts';export * from './source/venditbot/team-coordinator.ts';export * from './source/venditbot/agent-store.ts';export * from './source/venditbot/task-queue.ts';",resolveDir:process.cwd()},bundle:true,platform:'node',format:'esm',write:false});
-const {TeamStore,TeamCoordinator,AgentStore,TaskQueue,validTeamRun}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));
+const {TeamStore,TeamCoordinator: RawTeamCoordinator,AgentStore,TaskQueue,validTeamRun}=await import('data:text/javascript;base64,'+Buffer.from(built.outputFiles[0].text).toString('base64'));
+const TeamCoordinator=withSuccessfulFileReceiptFixtures(RawTeamCoordinator);
 const draft={name:'대표',instructions:'검증된 역할',connectionId:'codex',model:'qa-model',effort:'low',connections:[{connectionId:'codex',model:'qa-model',effort:'low'},{connectionId:'claude-code',model:'qa-claude'}],workspacePath:'/synthetic/workspace'};
 const deferred=()=>{let resolve;return {promise:new Promise(done=>resolve=done),resolve:value=>resolve(value)};};
 async function fixture(t,autonomous=true){

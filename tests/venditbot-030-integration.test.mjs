@@ -1,3 +1,4 @@
+import {withSuccessfulFileReceiptFixtures} from './fixtures/delegation-receipts.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {randomUUID} from 'node:crypto';
@@ -10,7 +11,8 @@ import {build} from 'esbuild';
 // Real coordinator, durable team store and serial task queue; only inference and
 // Electron are omitted. All records live in private synthetic temporary roots.
 const built = await build({stdin: {contents: "export * from './source/venditbot/team-store.ts'; export * from './source/venditbot/team-coordinator.ts'; export * from './source/venditbot/task-queue.ts';", resolveDir: process.cwd()}, bundle: true, platform: 'node', format: 'esm', write: false});
-const {TeamStore, TeamCoordinator, TaskQueue} = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'));
+const {TeamStore, TeamCoordinator: RawTeamCoordinator, TaskQueue} = await import('data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'));
+const TeamCoordinator=withSuccessfulFileReceiptFixtures(RawTeamCoordinator);
 const deferred = () => {let resolve; const promise = new Promise(done => resolve = done); return {promise, resolve};};
 async function fixture(t, initialCount) {
   const root = await mkdtemp(join(tmpdir(), 'venditbot-030-teams-'));

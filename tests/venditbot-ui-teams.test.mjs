@@ -13,7 +13,7 @@ globalThis.window = { React, ReactDOM: { createRoot: () => ({ render() {} }) }, 
 globalThis.document = { getElementById: () => ({}) };
 async function bundle(path) { const built = await build({ entryPoints: [new URL(path, import.meta.url).pathname], bundle: true, platform: 'node', format: 'esm', jsx: 'transform', jsxFactory: 'React.createElement', jsxFragment: 'React.Fragment', write: false }); return await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`); }
 const { App } = await bundle('../frontend/venditbot/app.tsx');
-const { TeamEditor } = await bundle('../frontend/venditbot/teams-ui.tsx');
+const { TeamEditor, TeamRunView } = await bundle('../frontend/venditbot/teams-ui.tsx');
 const { Markdown, MarkdownContent } = await bundle('../frontend/venditbot/markdown-view.tsx');
 const { AgentAvatar, AgentAvatarEditor, defaultAvatarDataUrl } = await bundle('../frontend/venditbot/agent-avatar.tsx');
 const { AgentSidebarCards, TeamSidebarCards } = await bundle('../frontend/venditbot/sidebar-profiles.tsx');
@@ -332,4 +332,15 @@ test('automatic representative save locks all draft edits but leaves cancellatio
   assert.equal(cancel.props.disabled, undefined); cancel.props.onPress(); assert.equal(cancelled, 1);
   const manual = treeElements(TeamEditor({draft: {...draft, leaderMode: 'existing'}, agents, onChange: noop, onSave: noop, onCancel: noop}));
   assert.equal(manual.some(item => item.props.kind === 'vendit' && item.props.children === '대표'), true);
+});
+
+test('accepted file artifact UI does not label the evidence as development or test completion',()=>{
+ const checked={...run,status:'completed',requiredPolicy:{id:'delegation-loop-required',version:1,sha256:'a'.repeat(64)},steps:[{...run.steps[1],status:'completed',acceptanceReceipt:{scope:'file_artifact',sessionId:'reviewer-work',messageId:'answer',callId:'read',sha256:'b'.repeat(64)}}]};
+ const html=renderToStaticMarkup(React.createElement(TeamRunView,{run:checked,sessions:[session],message:'',recipient:'',onMessage:noop,onRecipient:noop,onSend:noop,onCancel:noop,onRetry:noop,onOpenSession:noop}));assert.match(html,/파일 내용 확인됨/);assert.match(html,/개발·테스트 완료 증거 아님/);
+});
+
+
+test('published candidate evidence UI limits claim to exact historical head, never current PR or merge',()=>{
+ const checked={...run,status:'completed',steps:[{...run.steps[1],status:'completed',acceptanceReceipt:{scope:'published_candidate_verified',sessionId:'reviewer-work',messageId:'answer',callId:'start',sha256:'b'.repeat(64)}}]};
+ const html=renderToStaticMarkup(React.createElement(TeamRunView,{run:checked,sessions:[session],message:'',recipient:'',onMessage:noop,onRecipient:noop,onSend:noop,onCancel:noop,onRetry:noop,onOpenSession:noop}));assert.match(html,/게시된 특정 커밋의 테스트·검토 확인됨/);assert.match(html,/현재 PR·병합 상태는 별도/);assert.doesNotMatch(html,/병합 완료|현재 PR 확인됨/);
 });
