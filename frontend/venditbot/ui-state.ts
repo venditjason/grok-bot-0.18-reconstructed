@@ -13,7 +13,7 @@ export type Profile = ApiProviderProfile & { hasKey: boolean; verified: boolean 
 export type ToolStatus = { callId: string; name: string; path?: string; status: 'running' | 'completed' | 'failed'; summary?: string };
 export type AgentConnection = { connectionId: string; model: string; effort?: string };
 export type ConnectionAttempt = AgentConnection & { status: 'running' | 'failed' | 'completed'; error?: string };
-export type Message = { requiredPolicy?: import('../../source/shared/required-delegation-policy').RequiredPolicyPin; actionReceipt?: import('../../source/shared/required-delegation-policy').ActionReceipt; attachments?: ChatAttachment[]; routeSelection?: AgentPolicySelection; id: string; role: string; text: string; status?: string; error?: string; tools?: ToolStatus[]; attempts?: ConnectionAttempt[] };
+export type Message = { providerStatus?: 'retrying' | undefined; acceptedInputs?: {id:string;text:string;createdAt:string;attemptId:string;turnId:string}[]; requiredPolicy?: import('../../source/shared/required-delegation-policy').RequiredPolicyPin; actionReceipt?: import('../../source/shared/required-delegation-policy').ActionReceipt; attachments?: ChatAttachment[]; routeSelection?: AgentPolicySelection; id: string; role: string; text: string; status?: string; error?: string; tools?: ToolStatus[]; attempts?: ConnectionAttempt[] };
 export type Approval = { approvalId: string; sessionId: string; path: string; operation: 'write' | 'read' | 'list' | 'search' | 'manage'; preview?: string; existing?: boolean; tool?: string; category?: string; reason?: string };
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type AgentProfile = { development?: DevelopmentBinding; automation?: { policyId: string }; id: string; name: string; instructions: string; avatarId?: string; connectionId: string; model: string; effort?: string; connections?: AgentConnection[]; workspacePath?: string; createdAt: string; updatedAt: string };
@@ -30,9 +30,11 @@ export type UpdateProgress = {
   percent?: number; completedBytes?: number; totalBytes?: number; startedAt: string; updatedAt: string;
 };
 export type UpdateStatus = { phase: 'development' | 'idle' | 'available' | 'installing' | 'error'; currentVersion: string; version?: string; error?: string; progress?: UpdateProgress };
-export type State = { chatTurns?: ChatTurn[]; chatTurnStorageError?: string; routines?: Routine[]; routineError?: string; rabbitConnections?: RabbitProfile[]; rabbitRuns?: RabbitRunRecord[]; actionRules?: ActionRules; policies?: AgentPolicy[]; avatarJobs?: AvatarJob[]; update?: UpdateStatus; profiles: Profile[]; agents: AgentProfile[]; teams?: TeamProfile[]; teamRuns?: TeamRunSummary[]; sessions: Session[]; queue: { running: string[]; queued: string[] }; activeRun: { sessionId: string } | null; unsavedSessionIds?: string[]; unsavedTeamRunIds?: string[]; unsavedRabbitRunIds?: string[]; version: string };
+export type State = { chatTurns?: ChatTurn[]; chatTurnStorageError?: string; routines?: Routine[]; routineError?: string; rabbitConnections?: RabbitProfile[]; rabbitRuns?: RabbitRunRecord[]; actionRules?: ActionRules; policies?: AgentPolicy[]; avatarJobs?: AvatarJob[]; update?: UpdateStatus; profiles: Profile[]; agents: AgentProfile[]; teams?: TeamProfile[]; teamRuns?: TeamRunSummary[]; sessions: Session[]; queue: { running: string[]; queued: string[] }; activeRun: { sessionId: string; inputCapability?: 'steer' | 'fifo' } | null; unsavedSessionIds?: string[]; unsavedTeamRunIds?: string[]; unsavedRabbitRunIds?: string[]; version: string };
 export type Auth = { installed?: boolean; phase: string; authenticated: boolean; inferenceVerified: boolean; credentialStorage?: 'session' | 'keyring' | 'provider-managed'; account?: { email?: string | null; plan?: string | null } | null; error?: string | null };
 export type UiEvent =
+  | {type: 'provider-status'; sessionId: string; messageId: string; status: 'retrying'}
+  | {type: 'active-input'; sessionId: string; capability: 'steer' | 'fifo'}
   | {type: 'chat-turns'; turns: ChatTurn[]; error?: string}
   | { type: 'routines'; routines: Routine[] }
   | { type: 'routine-error'; error: string }
@@ -85,6 +87,7 @@ export function duplicateConnectionIndex(connections: AgentConnection[]): number
 
 /** Only the matching live message may receive streamed updates. */
 export function reduceStateEvent(state: State, event: UiEvent | QueueEvent): State {
+  if (event.type === 'active-input') return state.activeRun?.sessionId === event.sessionId ? {...state, activeRun: {...state.activeRun, inputCapability: event.capability}} : state;
   if (event.type === 'chat-turns') return {...state, chatTurns: event.turns, chatTurnStorageError: event.error};
   if (event.type === 'routine-error') return { ...state, routineError: event.error };
   if (event.type === 'routines') return { ...state, routines: event.routines };
@@ -96,14 +99,15 @@ export function reduceStateEvent(state: State, event: UiEvent | QueueEvent): Sta
   if (event.type === 'teams') return { ...state, teams: event.teams, agents: event.agents };
   if (event.type === 'team-run') return { ...state, teamRuns: [event.run, ...(state.teamRuns ?? []).filter(run => run.id !== event.run.id)] };
   if (event.type === 'storage') return { ...state, unsavedSessionIds: [...new Set(event.unsavedSessionIds)], unsavedTeamRunIds: [...new Set(event.unsavedTeamRunIds ?? [])], unsavedRabbitRunIds: [...new Set(event.unsavedRabbitRunIds ?? [])] };
-  if (event.type === 'queue') return { ...state, queue: { running: event.running, queued: event.queued }, activeRun: event.running[0] ? { sessionId: event.running[0] } : null };
+  if (event.type === 'queue') return { ...state, queue: { running: event.running, queued: event.queued }, activeRun: event.running[0] ? { sessionId: event.running[0], ...(state.activeRun?.sessionId === event.running[0] ? {inputCapability:state.activeRun.inputCapability} : {}) } : null };
   if (event.type === 'session') return { ...state, sessions: [event.session, ...state.sessions.filter(session => session.id !== event.session.id)] };
   if (event.type === 'run-end') return state.activeRun?.sessionId === event.sessionId ? { ...state, activeRun: null } : state;
-  if (event.type !== 'delta' && event.type !== 'tool-status') return state;
+  if (event.type !== 'delta' && event.type !== 'tool-status' && event.type !== 'provider-status') return state;
   return { ...state, sessions: state.sessions.map(session => session.id !== event.sessionId ? session : {
     ...session, messages: session.messages.map(message => {
       if (message.id !== event.messageId || message.status !== 'running') return message;
-      if (event.type === 'delta') return { ...message, text: message.text + event.delta };
+      if (event.type === 'provider-status') return {...message, providerStatus: event.status};
+      if (event.type === 'delta') return { ...message, providerStatus: undefined, text: message.text + event.delta };
       const tool: ToolStatus = { callId: event.callId, name: event.name, status: event.status, ...(event.path ? { path: event.path } : {}), ...(event.summary ? { summary: event.summary } : {}) };
       const tools = message.tools ?? [];
       return { ...message, tools: tools.some(item => item.callId === tool.callId) ? tools.map(item => item.callId === tool.callId ? tool : item) : [...tools, tool] };

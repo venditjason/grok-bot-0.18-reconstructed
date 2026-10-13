@@ -1,7 +1,9 @@
+import type {ActiveProviderTurn, ProviderSteerInput, ProviderSteerResult, SafeProviderFailure} from "../provider-turns.js";
+import {ProviderTurnFailure, codexTurnFailure, providerTurnFailure} from "./provider-failures.js";
 import {webInput} from "./native-web-events.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
-import { CodexAppServer, codexProtocolError, type CodexServerOptions } from "./codex-app-server.js";
+import { CodexAppServer, CodexRequestFailure, codexProtocolError, type CodexServerOptions } from "./codex-app-server.js";
 import { streamClaudeCliTurn, type ClaudeTurnEvent, type ClaudeMcpServer } from "./claude-cli-session.js";
 import { configureProviderCliPaths, resolveClaudeCodeCliPath, resolveCodexCliPath, validateProviderExecutable } from "./provider-cli-paths.js";
 import { createVenditBotChildEnvironment, ensureVenditBotDirectories, resolveVenditBotPaths } from "./venditbot-paths.js";
@@ -25,8 +27,12 @@ export interface ProviderAuthStatus {
 export interface ProviderLoginResult extends ProviderAuthStatus { authUrl?: string }
 export interface ProviderMessage { role: string; content: string | readonly unknown[]; [key: string]: unknown }
 export interface ProviderUsage { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
-export type CodexTurnEvent = { type: "text-delta"; delta: string } | { type: "done"; text: string; threadId: string; turnId: string; usage: ProviderUsage } | import('./native-web-events.js').NativeWebSearchEvent;
+export type CodexTurnEvent = {type:"provider-status";status:"retrying";failure:SafeProviderFailure} | { type: "text-delta"; delta: string } | { type: "done"; text: string; threadId: string; turnId: string; usage: ProviderUsage } | import('./native-web-events.js').NativeWebSearchEvent;
 export interface CodexTurnOptions {
+  clientConversationId?: string;
+  attemptId?: string;
+  /** Advisory main-process UI notification; this is not admission authority. */
+  onActiveTurn?: (turn: ActiveProviderTurn | null) => void;
   messages: readonly ProviderMessage[];
   model?: string;
   effort?: string;
@@ -105,6 +111,43 @@ export class ProviderAuthRuntime {
   private completedLogins = new Map<string, boolean>();
   private claudeLogin: ChildProcessWithoutNullStreams | undefined;
   private turnActive = false;
+  private activeCodexTurn: {descriptor: ActiveProviderTurn; server: CodexAppServer; stop: AbortController; close:()=>void; receipts: Map<string,{text:string;result:Promise<ProviderSteerResult>}>} | undefined;
+  /** Retain this turn's receipts after its admission fence closes; never turn an unknown duplicate into FIFO. */
+  private lastSteerTurn: Pick<NonNullable<ProviderAuthRuntime['activeCodexTurn']>, 'descriptor' | 'receipts'> | undefined;
+  getActiveTurn(): ActiveProviderTurn | null { return this.activeCodexTurn ? {...this.activeCodexTurn.descriptor} : null; }
+  async steer(input: ProviderSteerInput, signal?: AbortSignal): Promise<ProviderSteerResult> {
+    const binding = {clientConversationId:input.clientConversationId,attemptId:input.attemptId,clientMessageId:input.clientMessageId,turnId:input.expectedTurnId};
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (typeof input.clientConversationId !== 'string' || !input.clientConversationId || input.clientConversationId.length > 100 || input.clientConversationId.includes('\0') || !uuid.test(input.attemptId) || !uuid.test(input.clientMessageId)
+      || typeof input.expectedTurnId !== 'string' || !input.expectedTurnId || input.expectedTurnId.length > 256 || input.expectedTurnId.includes('\0') || typeof input.text !== 'string' || !input.text.trim() || input.text.length > 100000 || input.text.includes('\0')) return {...binding,state:'conflict-before-wire'};
+    const remembered = this.lastSteerTurn;
+    if (remembered && remembered.descriptor.clientConversationId === input.clientConversationId && remembered.descriptor.attemptId === input.attemptId && remembered.descriptor.turnId === input.expectedTurnId) {
+      const receipt = remembered.receipts.get(input.clientMessageId);
+      if (receipt) return receipt.text === input.text ? receipt.result : {...binding,state:'conflict-before-wire'};
+    }
+    const active = this.activeCodexTurn;
+    if (!active || active.descriptor.clientConversationId !== input.clientConversationId || active.descriptor.attemptId !== input.attemptId || active.descriptor.turnId !== input.expectedTurnId) return {...binding,state:'not-active-before-wire'};
+    const existing = active.receipts.get(input.clientMessageId);
+    if (existing) return existing.text === input.text ? existing.result : {...binding,state:'conflict-before-wire'};
+    if (active.receipts.size >= 16) return {...binding,state:'unsupported-before-wire'};
+    // Reserve the ID synchronously before any await or wire attempt.
+    const result: Promise<ProviderSteerResult> = Promise.resolve().then(async () => {
+      if (this.activeCodexTurn !== active || active.stop.signal.aborted || signal?.aborted) return {...binding,state:'not-active-before-wire'};
+      let sent = false;
+      try {
+        const ack = await active.server.requestObserved('turn/steer', {threadId:active.descriptor.threadId,expectedTurnId:input.expectedTurnId,clientUserMessageId:input.clientMessageId,input:[{type:'text',text:input.text}]},
+          {signal:signal ? AbortSignal.any([active.stop.signal,signal]) : active.stop.signal, onWriteAttempt:()=>{sent=true;}});
+        if (ack.turnId !== input.expectedTurnId) throw new ProviderTurnFailure({provider:'codex',code:'protocol',phase:'steer',outcome:'unknown',autoRetry:false});
+        return {...binding,state:'accepted'};
+      } catch (error) {
+        if (!sent && error instanceof CodexRequestFailure && error.outcome === 'not-sent') return {...binding,state:'not-active-before-wire'};
+        active.close();
+        return {...binding,state:'unknown',safeProviderFailure: {...runtimeTurnFailure(error,'codex','steer',true).safe}};
+      }
+    });
+    active.receipts.set(input.clientMessageId,{text:input.text,result});
+    return result;
+  }
   private claudeTurnController: AbortController | undefined;
   constructor(options: AuthRuntimeOptions = {}) { this.options = options; }
   private trackClaude(child: ChildProcessWithoutNullStreams): void { this.ownedClaudeChildren.add(child); child.once('exit', () => this.ownedClaudeChildren.delete(child)); child.once('error', () => {if (child.pid == null) this.ownedClaudeChildren.delete(child);}); }
@@ -341,6 +384,7 @@ export class ProviderAuthRuntime {
     this.states[provider] = initial(provider); return this.snapshot(provider);
   }
   shutdown(): void {
+    this.lastSteerTurn=undefined;
     this.invalidateModels("codex"); this.invalidateModels("claude-code");
     for (const provider of ["codex", "claude-code"] as const) { this.authGeneration[provider]++; const attempt = this.attempts[provider]; if (attempt != null) attempt.cancelled = true; }
     this.statusPending.clear();
@@ -367,19 +411,30 @@ export class ProviderAuthRuntime {
     if (options.signal?.aborted) throw abortError();
     this.turnActive = true;
     let server: CodexAppServer | undefined; let threadId: string | undefined; let turnId: string | undefined;
+    let inferenceSent = false; let phase: SafeProviderFailure["phase"] = "preflight";
     let finished = false; let text = ""; let usage: ProviderUsage = {};
     const events: { method: string; params: Loose }[] = [];
     let queuedBytes = 0;
     let wake: (() => void) | undefined; let failure: Error | undefined;
     const controller = new AbortController();
+    const terminalTurns = new Set<string>();
+    const announce = (turn: ActiveProviderTurn | null) => {try {options.onActiveTurn?.(turn);} catch {/* Advisory UI callback never controls admission. */}};
+    const deactivate = () => {
+      const active = this.activeCodexTurn;
+      if (active && active.descriptor.threadId === threadId) {this.activeCodexTurn=undefined; active.stop.abort(); announce(null);}
+    };
     const notify = (method: string, params: Loose) => {
       if (failure != null || params.threadId !== threadId) return;
+      const eventTurn = method === 'turn/completed' ? params.turn?.id : params.turnId;
+      if ((method === 'turn/completed' || method === 'error' && params.willRetry !== true) && typeof eventTurn === 'string') {
+        terminalTurns.add(eventTurn); if (eventTurn === turnId) deactivate();
+      }
       queuedBytes += Buffer.byteLength(JSON.stringify(params));
       if (queuedBytes > 8 * 1024 * 1024 || events.length >= 10_000) failure = new Error("Codex 대기 중인 스트림 크기 제한을 초과했습니다.");
       else events.push({ method, params });
       wake?.();
     };
-    const failed = (error: Error) => { failure ??= error; controller.abort(failure); wake?.(); };
+    const failed = (error: Error) => { deactivate(); failure ??= error instanceof ProviderTurnFailure || error.name === 'AbortError' ? error : new ProviderTurnFailure({provider:'codex',code:'connection',phase,outcome:inferenceSent?'unknown':'not-sent',autoRetry:false}); controller.abort(failure); wake?.(); };
     const closed = () => failed(new Error("Codex app-server closed during the request."));
     let interruptPromise: Promise<unknown> | undefined;
     const interrupt = () => {
@@ -391,13 +446,13 @@ export class ProviderAuthRuntime {
       if (server != null && turnId == null) server.close();
       else void interrupt();
     };
-    const timer = setTimeout(() => { failed(new Error("Codex 요청 시간이 초과되었습니다.")); if (server != null && turnId == null) server.close(); else void interrupt(); }, this.options.turnTimeoutMs ?? 5 * 60_000); timer.unref();
+    const timer = setTimeout(() => { failed(new ProviderTurnFailure({provider:"codex",code:"timeout",phase,outcome:inferenceSent?"unknown":"not-sent",autoRetry:false})); if (server != null && turnId == null) server.close(); else void interrupt(); }, this.options.turnTimeoutMs ?? 5 * 60_000); timer.unref();
     const toolResults = new Map<string, Promise<unknown>>();
     options.signal?.addEventListener("abort", abort, { once: true });
     try {
       if (options.signal?.aborted) abort();
-      if (!(await abortable(this.status("codex"), controller.signal)).authenticated) throw new Error("Codex 계정을 먼저 연결하세요.");
-      const selected = selectProviderModel(await abortable(this.listModels("codex"), controller.signal), options.model, options.effort);
+      if (!(await abortable(this.status("codex"), controller.signal)).authenticated) throw new ProviderTurnFailure({provider:"codex",code:"authentication",phase:"preflight",outcome:"not-sent",autoRetry:false});
+      const selected = selectTurnModel(await abortable(this.listModels("codex"), controller.signal), options.model, options.effort, "codex");
       if (options.systemInstructions != null && options.systemInstructions.length > 32_000) throw new Error("에이전트 지침은 32,000자 이하여야 합니다.");
       server = await abortable(this.codex(), controller.signal);
       server.on("notification", notify); server.on("failure", failed); server.on("closed", closed);
@@ -408,7 +463,7 @@ export class ProviderAuthRuntime {
         ...(tools.length ? { dynamicTools: tools.map(tool => ({ type: "function", name: tool.name, description: tool.description ?? "", inputSchema: tool.inputSchema ?? tool.parameters })) } : {}),
       }), controller.signal);
       threadId = started.thread?.id;
-      if (typeof threadId !== "string") throw new Error("Codex did not return a thread ID.");
+      if (typeof threadId !== 'string' || !threadId || threadId.length > 256 || threadId.includes('\0')) throw new ProviderTurnFailure({provider:'codex',code:'protocol',phase:'preflight',outcome:'not-sent',autoRetry:false});
       const last = options.messages.at(-1);
       if (last == null || last.role !== "user") throw new Error("Codex 요청은 새 사용자 메시지로 끝나야 합니다.");
       const history = options.messages.slice(0, -1).flatMap(message => codexHistoryItems(message));
@@ -422,9 +477,16 @@ export class ProviderAuthRuntime {
         return { success: true, contentItems: [{ type: "inputText", text: JSON.stringify(await result) ?? "null" }] };
       };
       if (options.signal?.aborted) throw abortError();
-      const turn = await abortable(server.request("turn/start", { threadId, input: codexInput(last.content), ...selected }), controller.signal);
+      phase = 'start';
+      const turn = await server.requestObserved("turn/start", { threadId, input: codexInput(last.content), ...selected }, {signal:controller.signal,onWriteAttempt:()=>{inferenceSent=true;}});
       turnId = turn.turn?.id;
-      if (typeof turnId !== "string") throw new Error("Codex did not return a turn ID.");
+      if (typeof turnId !== "string" || !turnId || turnId.length > 256 || turnId.includes('\0')) throw new ProviderTurnFailure({provider:'codex',code:'protocol',phase:'start',outcome:'unknown',autoRetry:false});
+      phase = 'stream';
+      if (typeof options.clientConversationId === 'string' && options.clientConversationId.length > 0 && options.clientConversationId.length <= 100 && !options.clientConversationId.includes('\0')
+        && typeof options.attemptId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(options.attemptId) && turn.turn.status === 'inProgress' && !terminalTurns.has(turnId) && !controller.signal.aborted) {
+        const descriptor: ActiveProviderTurn = {provider:'codex',capability:'steer',clientConversationId:options.clientConversationId,attemptId:options.attemptId,threadId,turnId};
+        this.activeCodexTurn={descriptor,server,stop:new AbortController(),close:deactivate,receipts:new Map()}; this.lastSteerTurn={descriptor,receipts:this.activeCodexTurn.receipts}; announce({...descriptor});
+      }
       if (options.signal?.aborted) abort();
       while (true) {
         if (failure != null) throw failure;
@@ -438,7 +500,7 @@ export class ProviderAuthRuntime {
           if (Buffer.byteLength(text) > 4 * 1024 * 1024) throw new Error("Codex 응답 크기 제한을 초과했습니다.");
           yield { type: "text-delta", delta: params.delta };
         } else if ((method === "item/started" || method === "item/completed") && params.item?.type === "webSearch") {
-          if (options.nativeWebSearch !== true) throw new Error("승인되지 않은 공식 웹 검색 이벤트입니다.");
+          if (options.nativeWebSearch !== true) throw new ProviderTurnFailure({provider:"codex",code:"policy",phase:"stream",outcome:"unknown",autoRetry:false});
           if (typeof params.item.id !== "string" || params.item.id.length > 200) throw new Error("공식 웹 검색 이벤트 형식이 올바르지 않습니다.");
           yield {type: 'native-web-search', callId: params.item.id, status: method === 'item/started' ? 'running' : 'completed', input: webInput(params.item.action ?? {query:params.item.query}), ...(method === 'item/completed' ? {output: {native_step_completed: true, results_received: Array.isArray(params.item.results) && params.item.results.length > 0}} : {})};
         } else if (method === "thread/tokenUsage/updated") {
@@ -449,12 +511,18 @@ export class ProviderAuthRuntime {
         } else if (method === "turn/completed" && params.turn?.id === turnId) {
           finished = true;
           if (params.turn.status === "interrupted") throw abortError();
-          if (params.turn.status !== "completed") throw new Error("Codex 요청이 실패했습니다. 부분 응답은 완료된 대화가 아닙니다.");
+          if (params.turn.status !== "completed") throw codexTurnFailure(params.turn.error);
           this.states.codex = { ...this.states.codex, phase: "ready", inferenceVerified: true, error: null };
           yield { type: "done", text, threadId, turnId, usage }; return;
-        } else if (method === "error" && params.willRetry !== true) throw new Error("Codex 공급자 요청이 실패했습니다.");
+        } else if (method === "error") {
+          const error = codexTurnFailure(params.error);
+          if (params.willRetry !== true) throw error;
+          yield {type:'provider-status',status:'retrying',failure:{...error.safe}};
+        }
       }
-    } finally {
+    } catch (error) { throw runtimeTurnFailure(error,'codex',phase,inferenceSent); }
+    finally {
+      deactivate();
       clearTimeout(timer); options.signal?.removeEventListener("abort", abort);
       if (server != null) {
         server.off("notification", notify); server.off("failure", failed); server.off("closed", closed); server.requestHandler = undefined;
@@ -480,21 +548,32 @@ export class ProviderAuthRuntime {
     if (!this.claudeAllowed()) throw new Error(POLICY_ERROR);
     if (this.turnActive) throw new Error("한 번에 하나의 공급자 요청만 실행할 수 있습니다.");
     this.turnActive = true;
-    const controller = new AbortController(); this.claudeTurnController = controller;
+    const controller = new AbortController(); this.claudeTurnController = controller; let inferenceSent = false;
     const abort = () => controller.abort();
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted) abort();
     try {
-      if (!(await abortable(this.status("claude-code"), controller.signal)).authenticated) throw new Error("Claude 계정을 먼저 연결하세요.");
-      const selected = selectProviderModel(await abortable(this.listModels("claude-code"), controller.signal), options.model, options.effort);
+      if (!(await abortable(this.status("claude-code"), controller.signal)).authenticated) throw new ProviderTurnFailure({provider:"claude-code",code:"authentication",phase:"preflight",outcome:"not-sent",autoRetry:false});
+      const selected = selectTurnModel(await abortable(this.listModels("claude-code"), controller.signal), options.model, options.effort, "claude-code");
       const executable = this.executable("claude-code");
       if (executable == null) throw new Error("Claude CLI 실행 파일이 필요합니다.");
-      for await (const event of streamClaudeCliTurn({ ...options, ...selected, signal: controller.signal, executable, cwd: this.paths().claudeConfigDir, env: this.claudeEnv(), onChild: child => this.trackClaude(child), ...(this.options.turnTimeoutMs ? { timeoutMs: this.options.turnTimeoutMs } : {}) })) {
+      for await (const event of streamClaudeCliTurn({ ...options, ...selected, signal: controller.signal, executable, cwd: this.paths().claudeConfigDir, env: this.claudeEnv(), onChild: child => {inferenceSent=true; this.trackClaude(child);}, ...(this.options.turnTimeoutMs ? { timeoutMs: this.options.turnTimeoutMs } : {}) })) {
         if (event.type === "done") this.states["claude-code"] = { ...this.states["claude-code"], phase: "ready", inferenceVerified: true, error: null };
         yield event;
       }
-    } finally { options.signal?.removeEventListener("abort", abort); this.claudeTurnController = undefined; this.turnActive = false; }
+    } catch (error) { throw runtimeTurnFailure(error,'claude-code',inferenceSent?'stream':'preflight',inferenceSent); }
+    finally { options.signal?.removeEventListener("abort", abort); this.claudeTurnController = undefined; this.turnActive = false; }
   }
+}
+function selectTurnModel(catalog: ProviderModelCatalog, model: string | undefined, effort: string | undefined, provider: SafeProviderFailure['provider']): ReturnType<typeof selectProviderModel> {
+  try {return selectProviderModel(catalog,model,effort);} catch {throw new ProviderTurnFailure({provider,code:'bad-request',phase:'preflight',outcome:'not-sent',autoRetry:false});}
+}
+function runtimeTurnFailure(error: unknown, provider: SafeProviderFailure['provider'], phase: SafeProviderFailure['phase'], sent: boolean): ProviderTurnFailure {
+  if (error instanceof CodexRequestFailure) {
+    const code = error.kind === 'timeout' ? 'timeout' : error.kind === 'cancelled' ? 'cancelled' : error.kind === 'protocol' ? 'protocol' : 'connection';
+    return new ProviderTurnFailure({provider,code,phase,outcome:sent?'unknown':'not-sent',autoRetry:false});
+  }
+  return providerTurnFailure(error,provider,phase,sent);
 }
 function codexInput(content: string | readonly unknown[]): Loose[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
@@ -537,3 +616,6 @@ export function testProviderConnection(provider: LoginProvider, model?: string, 
 export function listProviderModels(provider: LoginProvider, options?: { refresh?: boolean }): Promise<ProviderModelCatalog> { return runtime.listModels(provider, options); }
 export function runCodexTurn(options: CodexTurnOptions): AsyncGenerator<CodexTurnEvent> { return runtime.runCodexTurn(options); }
 export function runClaudeTurn(options: ClaudeTurnOptions): AsyncGenerator<ClaudeTurnEvent> { return runtime.runClaudeTurn(options); }
+
+export function getActiveProviderTurn(): ActiveProviderTurn | null {return runtime.getActiveTurn();}
+export function steerProviderTurn(input: ProviderSteerInput, signal?: AbortSignal): Promise<ProviderSteerResult> {return runtime.steer(input,signal);}

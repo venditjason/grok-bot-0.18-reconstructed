@@ -95,7 +95,7 @@ test('turn abort sends official interrupt and unlocks next request', async t => 
 });
 test('app-server crash during a turn fails promptly', async t => {
   const { runtime } = await setup(t, 'crash'); await login(runtime);
-  await assert.rejects(async () => { for await (const _ of runtime.runCodexTurn({ messages: [{ role: 'user', content: 'test' }] })) {} }, /exited/);
+  await assert.rejects(async () => { for await (const _ of runtime.runCodexTurn({ messages: [{ role: 'user', content: 'test' }] })) {} }, error => error.safe?.code === 'connection' && error.safe?.outcome === 'unknown');
 });
 test('duplicate dynamic tool delivery executes external work once', async t => {
   const { runtime } = await setup(t, 'tools'); await login(runtime); let executions = 0;
@@ -131,7 +131,7 @@ test('keyring rejection stays actionable across status reads and never falls bac
 });
 test('explicit shutdown wakes a blocked active turn', async t => {
   const { runtime } = await setup(t, 'hanging'); await login(runtime);
-  await assert.rejects(async () => { for await (const event of runtime.runCodexTurn({ messages: [{ role: 'user', content: 'test' }] })) if (event.type === 'text-delta') runtime.shutdown(); }, /closed/);
+  await assert.rejects(async () => { for await (const event of runtime.runCodexTurn({ messages: [{ role: 'user', content: 'test' }] })) if (event.type === 'text-delta') runtime.shutdown(); }, error => error.safe?.code === 'connection' && error.safe?.outcome === 'unknown');
 });
 test('cancel during login-start does not wait for a missing login ID and prevents stale completion', async t => {
   const {runtime,requests}=await setup(t,'slow-start');
@@ -184,7 +184,7 @@ test('official model catalog follows pagination, hides hidden rows and caches wi
 });
 test('Codex uses catalog defaults and validates model and effort before starting inference',async t=>{
   const {runtime,requests}=await setup(t);await login(runtime);
-  for(const options of [{model:'invented-model'},{model:'mock-codex-model',effort:'ultra'}])await assert.rejects(async()=>{for await(const _ of runtime.runCodexTurn({messages:[{role:'user',content:'test'}],...options})){}},/모델/);
+  for(const options of [{model:'invented-model'},{model:'mock-codex-model',effort:'ultra'}])await assert.rejects(async()=>{for await(const _ of runtime.runCodexTurn({messages:[{role:'user',content:'test'}],...options})){}},error=>error.safe?.code==='bad-request'&&error.safe?.phase==='preflight'&&error.safe?.outcome==='not-sent');
   assert.equal((await requests()).some(x=>x.method==='thread/start'),false);
   for await(const _ of runtime.runCodexTurn({messages:[{role:'user',content:'test'}]})){}
   const turn=(await requests()).find(x=>x.method==='turn/start');assert.equal(turn.params.model,'mock-codex-model');assert.equal(turn.params.effort,'low');
@@ -222,7 +222,7 @@ test('native Codex search is off by default, narrow opt-in keeps shell/files off
 });
 test('unapproved Codex search event fails instead of claiming a search completed',async t=>{
  const {runtime,requests}=await setup(t,'web-success');await login(runtime);const events=[];
- await assert.rejects(async()=>{for await(const event of runtime.runCodexTurn({messages:[{role:'user',content:'test'}]}))events.push(event);},/승인되지/);
+ await assert.rejects(async()=>{for await(const event of runtime.runCodexTurn({messages:[{role:'user',content:'test'}]}))events.push(event);},error=>error.safe?.code==='policy'&&error.safe?.outcome==='unknown');
  assert.equal((await requests()).find(x=>x.method==='thread/start').params.config.web_search,'disabled');assert.equal(events.some(x=>x.type==='done'),false);
 });
 test('native Codex search cancellation sends interrupt and never emits completed search',async t=>{

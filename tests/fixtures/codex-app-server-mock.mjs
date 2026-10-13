@@ -41,16 +41,23 @@ createInterface({ input: process.stdin }).on('line', line => {
       break;
     case 'account/login/cancel': ok({}); break;
     case 'account/logout': authenticated = false; if (existsSync(marker)) unlinkSync(marker); if (mode === 'slow-logout') setTimeout(() => ok({}), 100); else ok({}); break;
-    case 'thread/start': if (mode === 'slow-thread') setTimeout(() => ok({ thread: { id: 'thread-1' } }), 2000); else ok({ thread: { id: 'thread-1' } }); break;
+    case 'thread/start': if (mode === 'slow-thread') setTimeout(() => ok({ thread: { id: 'thread-1' } }), 2000); else ok({ thread: { id: mode === 'thread-empty' ? '' : mode === 'thread-long' ? 't'.repeat(257) : mode === 'thread-nul' ? 't\0' : mode === 'steer-boundary' ? 't'.repeat(256) : 'thread-1' } }); break;
     case 'thread/inject_items': ok({}); break;
     case 'thread/unsubscribe': ok({}); break;
     case 'turn/start': {
-      const threadId = msg.params.threadId, turnId = `turn-${++turn}`;
-      ok({ turn: { id: turnId, status: 'inProgress' } });
+      const threadId = msg.params.threadId, turnId = mode === 'turn-nul' ? 'u\0' : mode === 'turn-long' ? 'u'.repeat(257) : mode === 'turn-empty' ? '' : mode === 'steer-boundary' ? 'u'.repeat(256) : `turn-${++turn}`;
+      if (mode === 'start-lost-ack') break;
+      if (mode === 'terminal-before-ack') {complete(threadId,turnId); ok({turn:{id:turnId,status:'inProgress'}}); break;}
+      ok({ turn: { id: turnId, status: mode === 'steer-unconfirmed' ? 'unknown' : 'inProgress' } });
+      if (mode === 'terminal-error') {notify('error',{threadId,turnId,willRetry:false,error:{message:'SECRET_SENTINEL',additionalDetails:'SECRET_SENTINEL',codexErrorInfo:'serverOverloaded'}}); break;}
+      if (mode === 'retry-success') {notify('error',{threadId,turnId,willRetry:true,error:{message:'SECRET_SENTINEL',codexErrorInfo:'serverOverloaded'}}); setTimeout(()=>{notify('item/agentMessage/delta',{threadId,turnId,delta:'2'});complete(threadId,turnId);},30); break;}
+      if (mode === 'failed-info') {notify('turn/completed',{threadId,turn:{id:turnId,status:'failed',error:{message:'SECRET_SENTINEL',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:503}}}}});break;}
+      if (mode === 'terminal-paused') {notify('item/agentMessage/delta',{threadId,turnId,delta:'partial'});setTimeout(()=>complete(threadId,turnId),80);break;}
+
       notify('item/agentMessage/delta', { threadId: 'another-thread', turnId, delta: 'MUST_NOT_APPEAR' });
       if (mode === 'crash') { process.exit(3); break; }
       notify('item/agentMessage/delta', { threadId, turnId, delta: 'Hello ' });
-      if (mode === 'hanging' || mode === 'stuck-interrupt') break;
+      if (mode === 'hanging' || mode === 'stuck-interrupt' || mode.startsWith('steer')) break;
       if (mode.startsWith('web-')) {
         const item={type:'webSearch',id:'web-1',query:'weather Seoul',action:{type:'search',query:'weather Seoul',queries:null},results:[{url:'https://www.met.no/'}]};
         notify('item/started',{threadId,turnId,item});
@@ -67,6 +74,12 @@ createInterface({ input: process.stdin }).on('line', line => {
       }
       break;
     }
+    case 'turn/steer':
+      if (mode === 'steer-lost') break;
+      if (mode === 'steer-terminal') {complete(msg.params.threadId,msg.params.expectedTurnId);break;}
+      if (mode === 'steer-error') {send({id:msg.id,error:{code:-32603,message:'SECRET_SENTINEL'}});break;}
+      if (mode === 'steer-mismatch') {ok({turnId:'wrong-turn'});break;}
+      ok({turnId:msg.params.expectedTurnId}); break;
     case 'turn/interrupt': if (mode === 'stuck-interrupt') break; ok({}); complete(msg.params.threadId, msg.params.turnId, 'interrupted'); break;
     default: send({ id: msg.id, error: { code: -32601, message: 'unsupported' } });
   }

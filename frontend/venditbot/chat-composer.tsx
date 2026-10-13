@@ -3,11 +3,11 @@ import { shouldSendOnEnter } from './ui-state';
 const React: typeof ReactTypes = window.React;
 const { Button } = window.VDS;
 
-export function ChatComposer({ value, onChange, onSend, onCancel, label = '메시지', placeholder, focusRequest = 0, disabled, sending, canSend = !!value.trim(), maxLength = 100000, hint, cancelLabel = '응답 중단', onChooseAttachments, queueWhileRunning = false, children }: {
+export function ChatComposer({ value, onChange, onSend, onCancel, label = '메시지', placeholder, focusRequest = 0, disabled, sending, canSend = !!value.trim(), maxLength = 100000, hint, cancelLabel = '응답 중단', onChooseAttachments, queueWhileRunning = false, activeInputMode = 'fifo', children }: {
   value: string; onChange(text: string): void; onSend(): void; onCancel?(): void;
   label?: string; placeholder?: string; focusRequest?: number; disabled?: boolean; sending?: boolean;
   canSend?: boolean; maxLength?: number; hint?: string; cancelLabel?: string;
-  onChooseAttachments?(): void; queueWhileRunning?: boolean; children?: ReactTypes.ReactNode;
+  onChooseAttachments?(): void; queueWhileRunning?: boolean; activeInputMode?: 'steer' | 'fifo'; children?: ReactTypes.ReactNode;
 }) {
   const input = React.useRef<HTMLTextAreaElement>(null);
   React.useEffect(() => {
@@ -31,7 +31,7 @@ export function ChatComposer({ value, onChange, onSend, onCancel, label = '메�
           if (!disabled && !sending && canSend && (!onCancel || queueWhileRunning)) onSend();
         }
       }} />
-      {onCancel && <Button className="composer-submit" kind="destructive" hierarchy="secondary" size="medium" onPress={onCancel}>{cancelLabel}</Button>}{(!onCancel || queueWhileRunning) && <Button className="composer-submit" kind="vendit" size="medium" disabled={disabled || sending || !canSend} loading={sending} onPress={onSend}>{onCancel && queueWhileRunning ? '대기열에 추가' : '입력'}</Button>}
+      {onCancel && <Button className="composer-submit" kind="destructive" hierarchy="secondary" size="medium" onPress={onCancel}>{cancelLabel}</Button>}{(!onCancel || queueWhileRunning) && <Button className="composer-submit" kind="vendit" size="medium" disabled={disabled || sending || !canSend} loading={sending} onPress={onSend}>{onCancel && queueWhileRunning ? activeInputMode === 'steer' ? '진행 중 응답에 추가' : '대기열에 추가' : '입력'}</Button>}
     </div>
     {hint && <p className="composer-hint typo-l2/r text-glyph-gray-caption">{hint}</p>}
   </div>;

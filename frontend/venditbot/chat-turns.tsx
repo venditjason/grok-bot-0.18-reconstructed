@@ -7,13 +7,13 @@ const labels = {queued: '답변 대기', running: '답변 중', paused: '보류'
 export function ChatTurnList({turns, storageError, busy, onCancel, onRetry, onResume}: {
   turns: ChatTurn[]; storageError?: string; busy: boolean; onCancel(id: string): void; onRetry(id: string): void; onResume(): void;
 }) {
-  const pending = turns.filter(turn => turn.status !== 'completed' && turn.status !== 'running');
+  const pending = turns.filter(turn => turn.status !== 'completed' && (turn.status !== 'running' || !!turn.delivery));
   if (!pending.length && !storageError) return null;
   return <section className="chat-turns" aria-label="보낸 메시지 대기열">
-    <div className="chat-turn-heading"><span className="typo-l1/m">보낸 메시지 · 순서대로 답변</span>{pending.some(turn => turn.status === 'paused') && <Button kind="common" hierarchy="secondary" size="xsmall" disabled={busy} onPress={onResume}>다음 메시지 계속</Button>}</div>
+    <div className="chat-turn-heading"><span className="typo-l1/m">추가 입력과 대기 메시지</span>{pending.some(turn => turn.status === 'paused') && !pending.some(turn => turn.delivery?.phase === 'unknown') && <Button kind="common" hierarchy="secondary" size="xsmall" disabled={busy} onPress={onResume}>다음 메시지 계속</Button>}</div>
     {storageError && <p role="alert">대기열 저장에 실패해 다음 실행을 보류했습니다. {storageError}</p>}
     <ol>{pending.map(turn => <li key={turn.id}>
-      <div className="chat-turn-heading"><span className="typo-l2/r">{labels[turn.status]}</span><div>{(turn.status === 'failed' || turn.status === 'cancelled') && <Button kind="common" hierarchy="ghost" size="xsmall" disabled={busy} onPress={() => onRetry(turn.id)}>다시 시도</Button>}{turn.status !== 'cancelled' && <Button kind="common" hierarchy="ghost" size="xsmall" disabled={busy} onPress={() => onCancel(turn.id)}>취소</Button>}</div></div>
+      <div className="chat-turn-heading"><span className="typo-l2/r">{turn.delivery ? turn.delivery.phase === 'accepted' ? '진행 중 응답에 추가됨' : turn.delivery.phase === 'intent' ? '추가 입력 접수 확인 중' : '추가 입력 접수 미확인' : labels[turn.status]}</span><div>{!turn.delivery && (turn.status === 'failed' || turn.status === 'cancelled') && <Button kind="common" hierarchy="ghost" size="xsmall" disabled={busy} onPress={() => onRetry(turn.id)}>다시 시도</Button>}{turn.status !== 'cancelled' && turn.delivery?.phase !== 'unknown' && <Button kind="common" hierarchy="ghost" size="xsmall" disabled={busy} onPress={() => onCancel(turn.id)}>취소</Button>}</div></div>
       <p className="chat-turn-text">{turn.text}</p><AttachmentList files={turn.attachments}/>{turn.error && <p className="typo-l2/r text-glyph-gray-caption">{turn.error}</p>}
     </li>)}</ol>
   </section>;

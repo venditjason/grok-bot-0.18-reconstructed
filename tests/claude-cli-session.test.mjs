@@ -23,9 +23,9 @@ test('personal local Claude uses official auth commands and distinguishes infere
 test('Claude streams partial text and emits session identity only on successful result',async t=>{const runtime=await setup(t);const events=[];for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'hello'}]}))events.push(event);assert.equal(events.filter(x=>x.type==='text-delta').map(x=>x.delta).join(''),'Claude OK');assert.equal(events.at(-1).sessionId,'owned-claude-session');assert.deepEqual(events.at(-1).usage,{inputTokens:4,outputTokens:2});assert.equal(runtime.snapshot('claude-code').inferenceVerified,true)});
 for(const input of ['malformed','truncated','fail','auth-failure-success-subtype'])test(`Claude ${input} stream fails closed`,async t=>{const runtime=await setup(t);const events=[];await assert.rejects(async()=>{for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:input}]}))events.push(event)});assert.equal(events.some(x=>x.type==='done'),false);assert.equal(runtime.snapshot('claude-code').inferenceVerified,false)});
 test('Claude cancellation terminates owned process',async t=>{const runtime=await setup(t);const controller=new AbortController();await assert.rejects(async()=>{for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'hang'}],signal:controller.signal}))if(event.type==='text-delta')controller.abort()},{name:'AbortError'})});
-test('Claude does not flatten cross-provider history without its own session',async t=>{const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'assistant',content:'prior'},{role:'user',content:'next'}]})){}},/sessionId/)});
+test('Claude does not flatten cross-provider history without its own session',async t=>{const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'assistant',content:'prior'},{role:'user',content:'next'}]})){}},e=>e.safe?.provider==='claude-code'&&e.safe?.phase==='preflight'&&e.safe?.outcome==='not-sent');await assert.rejects(()=>recordedInput(runtime),{code:'ENOENT'})});
 test('Claude per-turn MCP token stays out of argv and only the app gateway is enabled',async t=>{const runtime=await setup(t);let done;for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'mcp-contract'}],mcpServer:{url:'http://127.0.0.1:12345/mcp',token:'synthetic_gateway_token_12345678901234567890'}}))if(event.type==='done')done=event;assert.equal(done.text,'Claude OK')});
-test('Claude refuses a non-loopback MCP endpoint before spawning inference',async t=>{const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'hello'}],mcpServer:{url:'https://remote.example/mcp',token:'synthetic_gateway_token_12345678901234567890'}})){}},/loopback/)});
+test('Claude refuses a non-loopback MCP endpoint before spawning inference',async t=>{const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'hello'}],mcpServer:{url:'https://remote.example/mcp',token:'synthetic_gateway_token_12345678901234567890'}})){}},e=>e.safe?.provider==='claude-code'&&e.safe?.phase==='preflight'&&e.safe?.outcome==='not-sent');await assert.rejects(()=>recordedInput(runtime),{code:'ENOENT'})});
 test('Claude resumed turns fork the last successful session so failed forks are not reused',async t=>{const runtime=await setup(t);let successful;for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'hello'}]}))if(event.type==='done')successful=event.sessionId;const history=[{role:'user',content:'hello'},{role:'assistant',content:'Claude OK'}];await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({sessionId:successful,messages:[...history,{role:'user',content:'fail'}]})){} });let next;for await(const event of runtime.runClaudeTurn({sessionId:successful,messages:[...history,{role:'user',content:'retry'}]}))if(event.type==='done')next=event;assert.equal(successful,'owned-claude-session');assert.equal(next.sessionId,'owned-claude-session-fork')});
 test('a status probe that captured old Claude credentials cannot restore connection after logout',async t=>{
  const root=await mkdtemp(path.join(tmpdir(),'venditbot-claude-race-'));const paths=resolveVenditBotPaths({homeDir:root,env:{}});
@@ -50,14 +50,14 @@ test('Claude model catalog preserves official aliases, resolved IDs, and supplie
 });
 test('Claude rejects unadvertised model or effort and accepts a pinned resolved model',async t=>{
  const runtime=await setup(t);
- for(const options of [{model:'invented-model'},{model:'mock-claude-model',effort:'ultra'},{model:'mock-fast',effort:'high'}])await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'test'}],...options})){}},/모델/);
+ for(const options of [{model:'invented-model'},{model:'mock-claude-model',effort:'ultra'},{model:'mock-fast',effort:'high'}])await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'test'}],...options})){}},e=>e.safe?.code==='bad-request'&&e.safe?.outcome==='not-sent');
  let done;for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'effort-contract'}],model:'mock-claude-model',effort:'high',systemInstructions:'OWNED_AGENT_INSTRUCTIONS'}))if(event.type==='done')done=event;
  assert.equal(done.text,'Claude OK');
 });
 test('Claude provider-disabled models are excluded from selection and cannot run by alias or resolved ID',async t=>{
  const runtime=await setup(t);const catalog=await runtime.listModels('claude-code');
  assert.deepEqual(catalog.models.map(model=>model.id),['default','mock-fast']);
- for(const model of ['mock-disabled','mock-disabled-1'])await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'hello'}],model,effort:'high'})){}},/모델/);
+ for(const model of ['mock-disabled','mock-disabled-1'])await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'hello'}],model,effort:'high'})){}},e=>e.safe?.code==='bad-request'&&e.safe?.outcome==='not-sent');
  assert.equal(runtime.snapshot('claude-code').inferenceVerified,false);
 });
 test('explicit Claude connection handoff preserves roles, tool IDs and results as quoted context',async t=>{
@@ -83,7 +83,7 @@ test('Claude handoff opt-in does not replay history into an existing resumed ses
 test('Claude handoff rejects oversized, unserializable or invalid context before inference',async t=>{
  const runtime=await setup(t);const cycle={role:'assistant',content:'previous'};cycle.extra=cycle;
  for(const previous of [{role:'assistant',content:'x'.repeat(500_000)},cycle,{role:'unexpected',content:'previous'}]){
-  await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[previous,{role:'user',content:'next'}],historyHandoff:true})){}},/문맥 이관/);
+  await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[previous,{role:'user',content:'next'}],historyHandoff:true})){}},e=>e.safe?.phase==='preflight'&&e.safe?.outcome==='not-sent');
  }
  await assert.rejects(()=>recordedInput(runtime),{code:'ENOENT'});
 });
@@ -98,7 +98,7 @@ test('Claude approved search enables only WebSearch plus owned MCP, and reports 
  assert.deepEqual(events.filter(x=>x.type==='native-web-search').map(x=>x.status),['running','failed']);
 });
 test('Claude refuses unapproved native search events and cancels an active search',async t=>{
- const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'web-fail'}]})){}},/승인되지/);
+ const runtime=await setup(t);await assert.rejects(async()=>{for await(const _ of runtime.runClaudeTurn({messages:[{role:'user',content:'web-fail'}]})){}},e=>e.safe?.outcome==='unknown'&&e.safe?.provider==='claude-code');
  const controller=new AbortController(),events=[];
  await assert.rejects(async()=>{for await(const event of runtime.runClaudeTurn({messages:[{role:'user',content:'web-hang'}],nativeWebSearch:true,signal:controller.signal})){events.push(event);if(event.type==='native-web-search')controller.abort();}},{name:'AbortError'});
  assert.equal(events.some(x=>x.type==='done'||x.status==='completed'),false);

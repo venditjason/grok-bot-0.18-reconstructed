@@ -1,3 +1,5 @@
+import {safeProviderFailure} from '../shared/node/provider-failures.js';
+import type {ChatTurn} from '../shared/chat-turns.js';
 import {delegatedRabbitIntent} from './rabbit-delegation.js';
 import {WebTools,WEB_TOOL_POLICY,wantsNativeWebSearch,nativeWebInstructions} from './web-tools.js';
 import type {NativeWebSearchEvent} from '../shared/node/native-web-events.js';
@@ -11,7 +13,7 @@ import { resolveVenditBotPaths, ensureVenditBotDirectories } from '../shared/nod
 import { SandSettingsStore } from '../shared/node/settings/sand-settings-store.js';
 import { apiProfileSecretKey, normalizeApiProviderProfile, type ApiProviderProfile } from '../shared/api-provider-config.js';
 import { streamApiProvider, validateApiProviderConnection } from '../host/extensions/inference/api-provider-transport.js';
-import { configureProviderAuthRuntime, beginProviderLogin, getProviderAuthStatus, cancelProviderLogin, disconnectProvider, testProviderConnection, shutdownProviderAuthRuntime, shutdownProviderAuthRuntimeForUpdate, runCodexTurn, runClaudeTurn, listProviderModels, type LoginProvider } from '../shared/node/provider-auth-runtime.js';
+import { configureProviderAuthRuntime, beginProviderLogin, getProviderAuthStatus, cancelProviderLogin, disconnectProvider, testProviderConnection, shutdownProviderAuthRuntime, shutdownProviderAuthRuntimeForUpdate, runCodexTurn, runClaudeTurn, getActiveProviderTurn, steerProviderTurn, listProviderModels, type LoginProvider } from '../shared/node/provider-auth-runtime.js';
 import {FeedbackTools, FEEDBACK_TOOL_POLICY, explicitAppFeedbackRequest} from './feedback-tools.js';
 import {FeedbackMainAdapter} from './feedback-main-adapter.js';
 import {readFeedbackDraftProof} from './feedback-draft-proof.js';
@@ -103,6 +105,7 @@ let releaseStartup!: () => void;
 const startupGate = new Promise<void>(resolve => { releaseStartup = resolve; });
 let startupFailure: string | undefined;
 let activeRun: { sessionId: string; controller: AbortController } | null = null;
+let inputAttempt: {sessionId: string; answerId: string; attemptId: string; controller: AbortController} | undefined;
 let testing = false;
 let credentialMutation = false;
 let quitting = false;
@@ -188,9 +191,22 @@ chatTurns = new ChatTurnQueue(paths.profileRoot, {
     started: hooks.started,
     settled: (session, error) => hooks.settled(session.taskStatus ?? 'failed', error),
   }, run, turn.attachments);},
+  active: sessionId => {
+    const active = getActiveProviderTurn(), local = inputAttempt;
+    return active && local && !local.controller.signal.aborted && activeRun?.controller === local.controller && active.clientConversationId === sessionId && local.sessionId === sessionId && active.attemptId === local.attemptId ? {...active, answerId: local.answerId} : null;
+  },
+  steer: turn => {
+    const delivery = turn.delivery!, local = inputAttempt;
+    const binding = {clientConversationId: turn.sessionId, attemptId: delivery.attemptId, expectedTurnId: delivery.turnId, clientMessageId: turn.id, text: turn.text};
+    if (!local || local.controller.signal.aborted || local.sessionId !== turn.sessionId || local.answerId !== delivery.answerId || local.attemptId !== delivery.attemptId || activeRun?.controller !== local.controller) return Promise.resolve({state: 'not-active-before-wire', clientConversationId: turn.sessionId, attemptId: delivery.attemptId, clientMessageId: turn.id, turnId: delivery.turnId});
+    return steerProviderTurn(binding, local.controller.signal);
+  },
+  accepted: saveAcceptedInput,
   cancel: cancelSession,
   changed: (turns, error) => emit({type: 'chat-turns', turns, ...(error ? {error} : {})}),
 });
+// Reconcile the durable provider acknowledgement if the app exited between its two local writes.
+for (const turn of chatTurns.snapshot()) if (turn.delivery?.phase === 'accepted') saveAcceptedInput(turn);
 teams = new TeamCoordinator(teamStore, {
   createSessions: run => {
     const existing = new Set(sessions.list().map(s => s.id));
@@ -335,8 +351,21 @@ function cancelSession(id: string): boolean {
   return cancelled;
 }
 function settleJob(id: string, error?: unknown): void { const hooks = jobHooks.get(id); jobHooks.delete(id); hooks?.settled(readSession(id), error); }
+function saveAcceptedInput(turn: ChatTurn): void {
+  if (turn.delivery?.phase !== 'accepted') throw new Error('추가 입력 접수 증거가 없습니다.');
+  const session = liveSessions.get(turn.sessionId) ?? readSession(turn.sessionId), answer = session.messages.find(message => message.id === turn.delivery!.answerId && message.role === 'assistant');
+  if (!answer) throw new Error('추가 입력의 원래 응답을 찾을 수 없습니다. 입력 기록은 보관했습니다.');
+  const input = {id: turn.id, text: turn.text, createdAt: turn.createdAt, attemptId: turn.delivery.attemptId, turnId: turn.delivery.turnId};
+  const previous = answer.acceptedInputs?.find(item => item.id === input.id);
+  if (previous) {if (JSON.stringify(previous) !== JSON.stringify(input)) throw new Error('추가 입력 기록의 결합이 다릅니다.'); return;}
+  (answer.acceptedInputs ??= []).push(input); const order = chatTurns?.snapshot().map(turn => turn.id) ?? []; answer.acceptedInputs.sort((a,b) => order.indexOf(a.id) - order.indexOf(b.id)); saveSession(session); emit({type: 'session', session});
+}
+function inputCapability(sessionId: string): 'steer' | 'fifo' {
+  const active = getActiveProviderTurn(), local = inputAttempt;
+  return active && local && !local.controller.signal.aborted && local.sessionId === sessionId && active.clientConversationId === sessionId && active.attemptId === local.attemptId ? 'steer' : 'fifo';
+}
 function state() {
-  return { chatTurns: chatTurns?.snapshot(), chatTurnStorageError: chatTurns?.error(), feedback: feedback.host.snapshot(), appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId } : null };
+  return { chatTurns: chatTurns?.snapshot(), chatTurnStorageError: chatTurns?.error(), feedback: feedback.host.snapshot(), appConnectors: appConnectors.list(), routines: routines.list(), routineError, version: productVersion, update: updater.state(), agents: agents.list(), policies: policies.list(), actionRules: actionRules.get(), avatarJobs: avatarJobs.list(), rabbitConnections: rabbit.connections(), rabbitRuns: rabbitStore.listRuns(), teams: teamStore.listTeams(), teamRuns: teams.summaries(), queue: taskQueue.state(), profiles: settings.getApiProviderProfiles().map(p => ({ ...p, hasKey: secrets.has(apiProfileSecretKey(p)), verified: verifiedProfiles.has(p.id) })), sessions: sessions.list().map(s => {const current = liveSessions.get(s.id) ?? unsavedSessions.get(s.id); return current ? structuredClone(current) : s;}), unsavedSessionIds: [...unsavedSessions.keys()], unsavedTeamRunIds, unsavedRabbitRunIds, usage: settings.getInferenceRouterUsage(), activeRun: activeRun ? { sessionId: activeRun.sessionId, inputCapability: inputCapability(activeRun.sessionId) } : null };
 }
 function enqueueSession(sessionId: string, text: string, hooks?: {started(): void; settled(session: ChatSession, error?: unknown): void}, operation = run, attachments?:ChatAttachment[]): {started: boolean; queued: boolean; sessionId: string} {
   const session = readSession(sessionId), queue = taskQueue.state();
@@ -556,7 +585,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
   const authorize = (request: ActionApprovalRequest) => authorizeAction(request, controller.signal, sessionId);
   const projectSource = {sessionId, ...(session.agentId ? {agentId: session.agentId} : {}), ...(session.teamRunId ? {teamRunId: session.teamRunId} : {})};
   const projectTaskText = () => {
-    if (!session.teamRunId) return text;
+    if (!session.teamRunId) return [text, ...(chatTurns?.snapshot().filter(turn => turn.sessionId === sessionId && turn.delivery?.answerId === answer.id).map(turn => turn.text) ?? [])].join('\n\n');
     const request = teams.userTaskContext(sessionId);
     if (!request) throw new Error('현재 팀의 사용자 요청을 확인할 수 없습니다.');
     return [request.goal, ...request.userInstructions].join('\n\n');
@@ -711,6 +740,7 @@ async function run(sessionId: string, text: string, controller: AbortController)
     for (const [index, route] of routes.entries()) {
       if (controller.signal.aborted) throw new DOMException('중단했습니다.', 'AbortError');
       const attempt: ConnectionAttempt = {...route, status: 'running'};
+      const attemptId = randomUUID(); inputAttempt = {sessionId, answerId: answer.id, attemptId, controller};
       (answer.attempts ??= []).push(attempt); persist(); emit({type: 'session', session});
       let completed = false, failed = false, failure: unknown, toolInvoked = false;
       let nextProviderSessionId: string | undefined, resumeParent: string | undefined, mcp: McpGateway | undefined;
@@ -734,8 +764,9 @@ async function run(sessionId: string, text: string, controller: AbortController)
         }
         const routeInstructions=[systemInstructions,nativeWebInstructions(nativeWebSearch)].filter(Boolean).join('\n\n');
         if (route.connectionId === 'codex') {
-          for await (const event of runCodexTurn({ messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), systemInstructions:routeInstructions, nativeWebSearch, tools, executeTool: executeAttempt, signal: attemptController.signal })) {
+          for await (const event of runCodexTurn({ clientConversationId: sessionId, attemptId, onActiveTurn: active => emit({type: 'active-input', sessionId, capability: active ? 'steer' : 'fifo'}), messages: history, model: route.model, ...(route.effort ? {effort: route.effort} : {}), systemInstructions:routeInstructions, nativeWebSearch, tools, executeTool: executeAttempt, signal: attemptController.signal })) {
             if (event.type === 'text-delta') addText(event.delta);
+            if (event.type === 'provider-status') emit({type: 'provider-status', sessionId, messageId: answer.id, status: 'retrying'});
             if (event.type === 'native-web-search') {toolInvoked=true;nativeToolEvent(route.connectionId,event);}
             if (event.type === 'done') { completed = true; if (!answer.text) addText(event.text); local(() => settings.recordInferenceUsage('codex', event.usage)); }
           }
@@ -783,9 +814,9 @@ async function run(sessionId: string, text: string, controller: AbortController)
           if (resumeParent) { session.providerSessionId = resumeParent; session.providerSessionBinding = connectionRouteKey(route); }
           else { delete session.providerSessionId; delete session.providerSessionBinding; }
         }
-        // Only a provider failure before any visible response or tool activity is
-        // eligible. Local storage/setup failures and user cancellation never retry.
-        if (controller.signal.aborted || localFailure || completed || answer.text || toolInvoked || answer.tools?.length || index === routes.length - 1) throw failure;
+        // Only a typed proof that inference was not sent permits a configured fallback.
+        // Visible output, tool effects, steering, local failure or cancellation always block it.
+        if (safeProviderFailure(failure)?.outcome !== 'not-sent' || chatTurns?.hasSteerEffect(sessionId, attemptId) || controller.signal.aborted || localFailure || completed || answer.text || toolInvoked || answer.tools?.length || index === routes.length - 1) throw failure;
         persist(); emit({type: 'session', session}); continue;
       }
       attempt.status = 'completed';
@@ -800,12 +831,14 @@ async function run(sessionId: string, text: string, controller: AbortController)
     answer.error = controller.signal.aborted ? '사용자가 응답을 중단했습니다.' : safeError(error);
   } finally {
     finalized = true; controller.abort();
+    if (inputAttempt?.controller === controller) inputAttempt = undefined;
+    emit({type: 'active-input', sessionId, capability: 'fifo'});
     session.taskStatus = answer.status === 'running' ? 'failed' : answer.status;
     for (const tool of answer.tools ?? []) if (tool.status === 'running') { tool.status = 'failed'; tool.summary = '응답 종료로 도구 실행이 중단되었습니다.'; }
     for (const attempt of answer.attempts ?? []) if (attempt.status === 'running') { attempt.status = 'failed'; attempt.error = answer.error ?? '응답이 종료되었습니다.'; }
     if (answer.requiredPolicy) { answer.actionReceipt = actionReceipt(answer.tools); if (answer.status === 'completed' && answer.actionReceipt.status === 'failed') {answer.status='failed';answer.error=answer.actionReceipt.reason;session.taskStatus='failed';} }
     let cleanupError: string | undefined;
-    try { saveSession(session); } catch (error) { cleanupError = `대화를 저장하지 못했습니다. 종료 전에 내보내기로 보관하세요. ${safeError(error)}`; }
+    try { chatTurns?.settleSteers(sessionId, answer.id, answer.status, answer.error); saveSession(session); } catch (error) { cleanupError = `대화를 저장하지 못했습니다. 종료 전에 내보내기로 보관하세요. ${safeError(error)}`; }
     finally {
       if (activeRun?.controller === controller) activeRun = null;
       emit({ type: 'session', session }); emit({ type: 'run-end', sessionId, ...(cleanupError ? {error: cleanupError} : {}) });
