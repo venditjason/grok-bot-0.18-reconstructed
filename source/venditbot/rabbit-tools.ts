@@ -1,3 +1,4 @@
+import {PLAYBOOK_IDS, type PlaybookTemplateId} from '../shared/delegation-playbooks.js';
 import {createHash} from 'node:crypto';
 import {normalizeRabbitRunInput, type RabbitConnection, type RabbitRunInput} from '../shared/rabbit-project-api.js';
 import type {RabbitRunRecord, RabbitRunSource} from './rabbit-store.js';
@@ -7,10 +8,11 @@ const connectionId = {type: 'string', description: 'An enabled project API conne
 export const RABBIT_TOOLS = [
   {name: 'list_project_connections', description: 'List project API connections explicitly enabled by the user for agents. Does not expose API keys or LLM login credentials.', inputSchema: schema({})},
   {name: 'list_project_repositories', description: 'Read repositories from one enabled Rabbit project. Repository metadata does not guarantee checkout readiness. The project-key API cannot list or choose private execution lanes/models.', inputSchema: schema({connectionId}, ['connectionId'])},
-  {name: 'start_project_run', description: 'Request one external Rabbit project run after host-enforced user approval. For reporting VenditBot bugs or requesting missing app capabilities, use submit_app_feedback so the saved report and designated development route are preserved. A 202 receipt means accepted, not completed. The remote scheduler chooses project lanes. Do not retry an uncertain request as a new run: preserve its local record ID for user review. No arbitrary remote commands, attachments, model/lane selection or remote approval bypass.', inputSchema: schema({connectionId, input: schema({objective: {type: 'string', maxLength: 20000}, acceptance_criteria: {type: 'array', minItems: 1, maxItems: 30, items: {type: 'string', maxLength: 2000}}, repository_id: {type: 'string'}, base_ref: {type: 'string'}, workflow_template: {type: 'string', enum: ['feature_pr','bugfix_pr','review_only']}, constraints: schema({max_parallel_tasks: {type: 'integer', minimum: 1, maximum: 4}, timeout_seconds: {type: 'integer', minimum: 60, maximum: 14400}})}, ['objective', 'acceptance_criteria'])}, ['connectionId','input'])},
+  {name: 'start_project_run', description: 'Request one external Rabbit project run after host-enforced user approval. For reporting VenditBot bugs or requesting missing app capabilities, use submit_app_feedback so the saved report and designated development route are preserved. A 202 receipt means accepted, not completed. The remote scheduler chooses project lanes. Do not retry an uncertain request as a new run: preserve its local record ID for user review. No arbitrary remote commands, attachments, model/lane selection or remote approval bypass.', inputSchema: schema({connectionId, input: schema({objective: {type: 'string', maxLength: 20000}, acceptance_criteria: {type: 'array', minItems: 1, maxItems: 30, items: {type: 'string', maxLength: 2000}}, repository_id: {type: 'string'}, base_ref: {type: 'string'}, playbook_template_id: {type: 'string', enum: PLAYBOOK_IDS}, workflow_template: {type: 'string', enum: ['feature_pr','bugfix_pr','review_only']}, constraints: schema({max_parallel_tasks: {type: 'integer', minimum: 1, maximum: 4}, timeout_seconds: {type: 'integer', minimum: 60, maximum: 14400}})}, ['objective', 'acceptance_criteria'])}, ['connectionId','input'])},
   {name: 'get_project_run', description: 'Read status and bounded events for a local Rabbit run record created by this conversation, or by this same agent in the current team run. Cannot query arbitrary remote run IDs. Remote cancellation and approval are available only in the Rabbit owner UI.', inputSchema: schema({id: {type: 'string', description: 'Local run record ID returned by start_project_run.'}}, ['id'])},
 ];
 export type RabbitToolPort = {
+  playbookTemplateId?(): PlaybookTemplateId | undefined;
   connections(): RabbitConnection[];
   repositories(connection: RabbitConnection): Promise<unknown>;
   start(connection: RabbitConnection, input: RabbitRunInput, requestId: string, source: RabbitRunSource): Promise<RabbitRunRecord>;
@@ -62,7 +64,10 @@ export class RabbitTools {
       if(name==='list_project_repositories'){
         failIfAborted(this.signal);return this.port.repositories(connection);
       }
-      const input=normalizeRabbitRunInput(args.input,connection);failIfAborted(this.signal);
+      const input=normalizeRabbitRunInput(args.input,connection);
+      const selected=this.port.playbookTemplateId?.();
+      if(selected){if(input.playbook_template_id!==undefined&&input.playbook_template_id!==selected)throw new Error('선택된 업무 매뉴얼을 모델 입력으로 바꿀 수 없습니다.');input.playbook_template_id=selected;}
+      failIfAborted(this.signal);
       return this.port.start(connection,input,requestIdentity(this.source.sessionId,callId),this.source);
     });
     this.tail=result.catch(()=>{});this.calls.set(callId,{fingerprint,result});return result;

@@ -392,3 +392,11 @@ test('uncertain send retains draft and durable request ID across renderer reload
  invoke=async(method,args)=>{calls.push([method,args]);throw Error('acknowledgement lost');};let tree=render();composer(tree).onChange('보관할 메시지');tree=render();composer(tree).onSend();await tick();assert.equal(composer(render()).value,'보관할 메시지');const first=calls[0][1].requestId;
  render=fixture(snapshot,disk,props);invoke=async(method,args)=>{calls.push([method,args]);return {};};tree=render();composer(tree).onSend();await tick();assert.equal(calls[1][1].requestId,first);assert.equal(composer(render()).value,'');
 });
+
+test('playbook choice uses the real policy selector and survives draft reopen and save IPC',async()=>{
+ const policy={id:'manual-policy',name:'매뉴얼',description:'',defaultTaskKind:'standard',rules:['routine','standard','complex'].map(taskKind=>({taskKind,keywords:[],connections:[{connectionId:'api',model:'fixture'}]})),createdAt:'2026-01-01',updatedAt:'2026-01-02'};
+ const snapshot={...state,policies:[policy],profiles:[{id:'api',name:'API',model:'fixture',hasKey:true}]},disk=memoryStorage();let render=fixture(snapshot,disk),tree=render();button(tree,'설정').props.onPress();tree=render();button(tree,'작업 정책').props.onPress();tree=render();component(tree,'PolicySettings').props.onEdit(policy.id);tree=render();
+ let editor=component(tree,'PolicySettings'),view=editor.type(editor.props),picker=elements(view).find(node=>node.props['aria-label']==='업무 매뉴얼 템플릿');assert.equal(elements(picker).filter(x=>x.type==='option').length,4);picker.props.onChange({target:{value:'bug-improvement-loop'}});render();
+ render=fixture(snapshot,disk);tree=render();button(tree,'초안 보기').props.onPress();tree=render();component(tree,'DraftRecovery').props.onPolicy(policy.id);tree=render();editor=component(tree,'PolicySettings');assert.equal(editor.props.record.draft.playbookTemplateId,'bug-improvement-loop');
+ let request;invoke=async(method,args)=>{assert.equal(method,'savePolicy');request=args;return {...snapshot,policies:[{...policy,...args.policy,updatedAt:'2026-01-03'}]};};editor.props.onSave();await tick();assert.equal(request.policy.playbookTemplateId,'bug-improvement-loop');
+});

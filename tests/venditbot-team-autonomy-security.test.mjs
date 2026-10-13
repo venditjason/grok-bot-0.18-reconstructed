@@ -1,3 +1,4 @@
+import {withSuccessfulFileReceiptFixtures} from './fixtures/delegation-receipts.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {mkdtemp, readFile, rm} from 'node:fs/promises';
@@ -16,8 +17,9 @@ const built = await build({stdin: {contents: [
   "export * from './source/venditbot/task-queue.ts';",
   "export * from './source/venditbot/agent-management-tools.ts';",
 ].join('\n'), resolveDir: process.cwd()}, bundle: true, platform: 'node', format: 'esm', write: false});
-const {TeamStore, TeamCoordinator, AgentStore, TaskQueue, AgentManagementTools} = await import(
+const {TeamStore, TeamCoordinator: RawTeamCoordinator, AgentStore, TaskQueue, AgentManagementTools} = await import(
   'data:text/javascript;base64,' + Buffer.from(built.outputFiles[0].text).toString('base64'));
+const TeamCoordinator=withSuccessfulFileReceiptFixtures(RawTeamCoordinator);
 const deferred = () => {let resolve; return {promise: new Promise(done => {resolve = done;}), resolve: value => resolve(value)};};
 const configuration = {name: '대표', instructions: '저장된 역할', connectionId: 'codex', model: 'synthetic-model', effort: 'low',
   connections: [{connectionId: 'codex', model: 'synthetic-model', effort: 'low'}], workspacePath: '/synthetic/selected-workspace'};

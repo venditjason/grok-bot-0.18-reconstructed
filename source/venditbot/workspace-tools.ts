@@ -87,6 +87,16 @@ export class WorkspaceExecutor {
     }
     finally { closeSync(fd); }
   }
+  /** Host-only final acceptance check. Never returns file bytes or grants a model a new read tool. */
+  matchesFileContent(path: string, expectedSha256: string): boolean {
+    checkAbort(this.signal);
+    if(!/^[a-f0-9]{64}$/.test(expectedSha256))throw new Error('파일 수용 해시를 확인하세요.');
+    const target=this.scoped(path), before=lstatSync(target);
+    const actual=createHash('sha256').update(this.read(target)).digest('hex');
+    const after=lstatSync(this.scoped(path));
+    if(!sameFile(before,after)||before.size!==after.size||before.mtimeMs!==after.mtimeMs||before.ctimeMs!==after.ctimeMs||after.nlink!==1)throw new Error('최종 확인 중 파일이 변경되었습니다.');
+    return actual===expectedSha256;
+  }
   execute(name: string, args: unknown, callId: string): Promise<unknown> {
     if (typeof callId !== 'string' || !callId || callId.length > 2000) return Promise.reject(new Error('도구 호출 ID가 올바르지 않습니다.'));
     let captured: unknown, fingerprint: string;

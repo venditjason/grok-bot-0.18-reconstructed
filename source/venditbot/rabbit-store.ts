@@ -2,10 +2,10 @@ import {constants, lstatSync, openSync, closeSync, fstatSync, readSync, mkdirSyn
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {atomicWriteJson} from './local-store.js';
-import {normalizeRabbitConnectionDraft, normalizeRabbitConnection, normalizeRabbitRunInput, normalizeRabbitRunReceipt, normalizeRabbitRunDetail, normalizeRabbitEventPage,
-  type RabbitConnection, type RabbitRunInput, type RabbitRunReceipt, type RabbitRunDetail, type RabbitEventPage} from '../shared/rabbit-project-api.js';
+import {executionManual, normalizeRabbitConnectionDraft, normalizeRabbitConnection, normalizeRabbitRunInput, normalizeRabbitRunReceipt, normalizeRabbitRunDetail, normalizeRabbitEventPage,
+  type RabbitExecutionManual, type RabbitConnection, type RabbitRunInput, type RabbitRunReceipt, type RabbitRunDetail, type RabbitEventPage} from '../shared/rabbit-project-api.js';
 
-export type RabbitRunSource = {sessionId: string; agentId?: string; teamRunId?: string};
+export type RabbitRunSource = {sessionId: string; agentId?: string; teamRunId?: string; delegation?:{contractSha256:string;policySha256:string}};
 export type RabbitRunRecord = {
   id: string; connectionId: string; connectionSnapshot: RabbitConnection;
   request: RabbitRunInput; idempotencyKey: string;
@@ -14,7 +14,7 @@ export type RabbitRunRecord = {
   /** A previous POST may have committed. A rejected later attempt is not proof
    * that the original work did not start; only its validated receipt clears this. */
   unresolvedSubmission?: true;
-  receipt?: RabbitRunReceipt; detail?: RabbitRunDetail; events?: RabbitEventPage; error?: string;
+  manualPin?:RabbitExecutionManual; receipt?: RabbitRunReceipt; detail?: RabbitRunDetail; events?: RabbitEventPage; error?: string;
 };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 const maxBytes = 16 * 1024 * 1024;
@@ -23,7 +23,8 @@ function object(value: unknown): Record<string, unknown> {if (!value || typeof v
 function bounded(value: unknown, max: number): string {if (typeof value !== 'string' || !value || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) throw new Error('프로젝트 API 저장 값이 올바르지 않습니다.'); return value;}
 function identity(value: unknown): string {const id = bounded(value, 100); if (!uuid.test(id)) throw new Error('프로젝트 API 기록 ID가 올바르지 않습니다.'); return id;}
 function date(value: unknown): string {const text = bounded(value, 40); if (!Number.isFinite(Date.parse(text))) throw new Error('프로젝트 API 기록 날짜가 올바르지 않습니다.'); return text;}
-function source(value: unknown): RabbitRunSource {const input = object(value); return {sessionId: bounded(input.sessionId, 100), ...(input.agentId === undefined ? {} : {agentId: bounded(input.agentId, 100)}), ...(input.teamRunId === undefined ? {} : {teamRunId: bounded(input.teamRunId, 100)})};}
+function source(value: unknown): RabbitRunSource {const input = object(value); return {sessionId: bounded(input.sessionId, 100), ...(input.agentId === undefined ? {} : {agentId: bounded(input.agentId, 100)}), ...(input.teamRunId === undefined ? {} : {teamRunId: bounded(input.teamRunId, 100)}), ...(input.delegation===undefined?{}:{delegation:delegationPin(input.delegation)})};}
+function delegationPin(value:unknown):{contractSha256:string;policySha256:string}{const x=object(value);for(const k of ['contractSha256','policySha256'])if(typeof x[k]!=='string'||!/^[a-f0-9]{64}$/.test(x[k] as string))throw Error('위임 정책 바인딩이 올바르지 않습니다.');return {contractSha256:x.contractSha256 as string,policySha256:x.policySha256 as string};}
 const binding = (connection: RabbitConnection) => JSON.stringify([connection.baseUrl, connection.projectId, connection.allowInsecureLoopback === true]);
 function normalizeRecord(value: unknown): RabbitRunRecord {
   const input = object(value), connectionSnapshot = normalizeRabbitConnection(input.connectionSnapshot), id = identity(input.id), connectionId = identity(input.connectionId);
@@ -33,6 +34,7 @@ function normalizeRecord(value: unknown): RabbitRunRecord {
     phase: input.phase as RabbitRunRecord['phase'], createdAt: date(input.createdAt), updatedAt: date(input.updatedAt), attempts: Number(input.attempts), ...(input.source === undefined ? {} : {source: source(input.source)}),
     ...(input.error === undefined ? {} : {error: bounded(input.error, 800)}),
     ...(input.unresolvedSubmission === true || input.phase === 'unknown' ? {unresolvedSubmission: true as const} : {})};
+  if(input.manualPin!==undefined)result.manualPin=executionManual(input.manualPin).execution_manual!;
   if (input.receipt !== undefined) result.receipt = normalizeRabbitRunReceipt(input.receipt, connectionSnapshot);
   if (result.receipt && result.unresolvedSubmission) throw new Error('프로젝트 API 접수증과 미확인 상태가 일치하지 않습니다.');
   if (result.phase === 'accepted' && !result.receipt) throw new Error('접수된 프로젝트 API 기록에 접수증이 없습니다.');
@@ -133,7 +135,7 @@ export class RabbitStore {
     const run = this.getRun(id); if (run.phase !== 'submitting') throw new Error('이미 종료되거나 변경된 프로젝트 접수 요청입니다.');
     const receipt = normalizeRabbitRunReceipt(value, run.connectionSnapshot);
     delete run.error; delete run.unresolvedSubmission;
-    return this.replace({...run, phase: 'accepted', receipt});
+    return this.replace({...run, phase:'accepted',receipt,...(receipt.execution_manual?{manualPin:receipt.execution_manual}:{})});
   }
   failSubmission(id: string, failure: {uncertain: boolean; error: string}): RabbitRunRecord {
     const run = this.getRun(id); if (run.receipt) return run;
@@ -145,7 +147,9 @@ export class RabbitStore {
     const run = this.getRun(id); if (!run.receipt) throw new Error('접수증을 먼저 확인하세요.');
     const scope = {projectId: run.connectionSnapshot.projectId, runId: run.receipt.run_id};
     delete run.error;
-    return this.replace({...run, detail: normalizeRabbitRunDetail(value, scope), ...(events === undefined ? {} : {events: normalizeRabbitEventPage(events, scope)})});
+    const detail=normalizeRabbitRunDetail(value,scope);
+    if(run.manualPin && JSON.stringify(run.manualPin)!==JSON.stringify(detail.execution_manual))throw Error('Rabbit 실행 매뉴얼이 최초 관측과 다릅니다.');
+    return this.replace({...run, ...(detail.execution_manual?{manualPin:run.manualPin??detail.execution_manual}:{}), detail, ...(events === undefined ? {} : {events: normalizeRabbitEventPage(events, scope)})});
   }
   private replace(run: RabbitRunRecord, recoverable = true): RabbitRunRecord {
     const next = normalizeRecord({...run, updatedAt: stamp(run.updatedAt)});

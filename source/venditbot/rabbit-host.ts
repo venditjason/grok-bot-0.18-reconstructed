@@ -1,3 +1,6 @@
+import {ownedDelegatedRecord, verifyRabbitPublication} from './rabbit-delegation.js';
+import type {DelegationContract} from './delegation-evidence.js';
+import type {ChatSession} from './local-store.js';
 import {randomUUID} from 'node:crypto';
 import {normalizeRabbitConnectionDraft, normalizeRabbitRunInput, rabbitUuid, validateRabbitProjectApiKey, type RabbitConnection, type RabbitConnectionTest, type RabbitRunInput} from '../shared/rabbit-project-api.js';
 import {testRabbitConnection, submitRabbitRun, getRabbitRun, getRabbitEvents, RabbitProjectApiError} from './rabbit-project-client.js';
@@ -130,6 +133,21 @@ export class RabbitHost {
       // Always replaying page one would hide every result after event 100.
       const events={...page,items:[...(record.events?.items??[]),...page.items].slice(-100)};
       const saved=this.options.store.saveObservation(id,detail,events);this.options.changed();return saved;
+    });
+  }
+  verifyDelegation(session:ChatSession,contract:DelegationContract,signal:AbortSignal){
+    const {record}=ownedDelegatedRecord(this.options.store.listRuns(),session,contract);
+    return this.operation(`verify:${record.id}`,AbortSignal.any([signal,AbortSignal.timeout(30_000)]),async current=>{
+      const connection=this.options.store.getConnection(record.connectionId),keyRevision=this.options.secrets.revision(secretKey(connection.id));
+      const currentCheck=()=>{abort(current);this.checked(connection,true);if(!keyRevision||this.options.secrets.revision(secretKey(connection.id))!==keyRevision)throw Error('Rabbit 수용 중 API 키가 변경되었습니다.');const fresh=this.options.store.getRun(record.id);if(JSON.stringify(fresh.request)!==JSON.stringify(record.request)||JSON.stringify(fresh.source)!==JSON.stringify(record.source)||fresh.receipt?.run_id!==record.receipt?.run_id||this.options.store.unsavedRunIds().includes(record.id))throw Error('Rabbit 원격 요청의 저장·바인딩을 확인할 수 없습니다.');};
+      currentCheck();
+      if(!await this.options.authorize({path:'.',operation:'read',tool:'get_project_run',category:'routine',reason:`${connection.name}의 자식 요청에 결합된 검증·게시 증거를 새로 조회합니다. 현재 PR 또는 병합 상태를 보증하지 않습니다.`},current,session.id))throw Error('프로젝트 검증 영수증 조회를 승인하지 않았습니다.');
+      currentCheck();const key=await this.key(connection,current,true);currentCheck();
+      return verifyRabbitPublication(session,contract,this.options.store.listRuns(),{
+        detail:()=>getRabbitRun(record.connectionSnapshot,key,record.receipt!.run_id,current),
+        events:cursor=>getRabbitEvents(record.connectionSnapshot,key,record.receipt!.run_id,cursor,current),
+        pin:detail=>{this.options.store.saveObservation(record.id,detail);currentCheck();this.options.changed();},current:currentCheck,
+      },current);
     });
   }
   async abortAndWait(timeoutMs=4000):Promise<boolean>{

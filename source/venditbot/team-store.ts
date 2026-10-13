@@ -1,3 +1,6 @@
+import type {PublishedCandidateProof} from './rabbit-delegation.js';
+import {validRequiredPolicy, type RequiredPolicyPin} from '../shared/required-delegation-policy.js';
+import {delegationContract, type DelegationContract} from './delegation-evidence.js';
 import {validChatAttachments,type ChatAttachment} from '../shared/chat-attachments.js';
 import {validDevelopmentBinding, type DevelopmentBinding} from '../shared/development-routing.js';
 import {lstatSync, readFileSync} from 'node:fs';
@@ -13,9 +16,9 @@ export type TeamStepStatus = TeamStatus | 'pending';
 export type TeamCreation = {requestId: string; inputHash: string; leaderAgentId: string; policyId: string};
 export type TeamProfile = {development?: DevelopmentBinding;creation?: TeamCreation; autonomous?: boolean; id: string; name: string; instructions: string; topic: string; policies: string; leaderAgentId: string; memberAgentIds: string[]; rounds: number; createdAt: string; updatedAt: string};
 export type TeamMessage = {attachments?:ChatAttachment[];id: string; fromAgentId?: string; fromAgentName: string; toAgentId?: string; text: string; kind: 'user' | 'agent' | 'result' | 'system'; sessionId?: string; createdAt: string};
-export type TeamStep = {sessionId: string; agentId: string; agentName: string; round: number; kind: 'plan' | 'work' | 'summary'; taskKind?: 'routine' | 'standard' | 'complex'; connections?: ConnectionRoute[]; routeSelection?: AgentPolicySelection; task?: string; parentSessionId?: string; status: TeamStepStatus};
+export type TeamStep = {supersedesSessionId?: string; correction?: {category:'procedure'|'resource'|'verification';change:string;regression:string}; contract?: DelegationContract; acceptanceReceipt?: {scope:'file_artifact';sessionId:string;messageId:string;callId:string;sha256:string}|PublishedCandidateProof;sessionId: string; agentId: string; agentName: string; round: number; kind: 'plan' | 'work' | 'summary'; taskKind?: 'routine' | 'standard' | 'complex'; connections?: ConnectionRoute[]; routeSelection?: AgentPolicySelection; task?: string; parentSessionId?: string; status: TeamStepStatus};
 export type TeamContext = {runId: string; goal: string; policies: string; result: string; excerpt: boolean};
-export type StoredTeamRun = {routineDispatchId?: string;development?: DevelopmentBinding;autonomous?: boolean; id: string; teamId: string; teamName: string; teamUpdatedAt: string; previousRunId?: string; context?: TeamContext[]; policySnapshots?: {agentId: string; policy: AgentPolicy}[]; goal: string; instructions: string; topic: string; policies: string; leaderAgentId: string; activeMemberAgentIds: string[]; memberSnapshots: AgentProfile[]; additions: number; status: TeamStatus; rounds: number; createdAt: string; updatedAt: string; steps: TeamStep[]; messages: TeamMessage[]; finalSessionId?: string; error?: string};
+export type StoredTeamRun = {requiredPolicy?: RequiredPolicyPin;routineDispatchId?: string;development?: DevelopmentBinding;autonomous?: boolean; id: string; teamId: string; teamName: string; teamUpdatedAt: string; previousRunId?: string; context?: TeamContext[]; policySnapshots?: {agentId: string; policy: AgentPolicy}[]; goal: string; instructions: string; topic: string; policies: string; leaderAgentId: string; activeMemberAgentIds: string[]; memberSnapshots: AgentProfile[]; additions: number; status: TeamStatus; rounds: number; createdAt: string; updatedAt: string; steps: TeamStep[]; messages: TeamMessage[]; finalSessionId?: string; error?: string};
 export type TeamRunSummary = Omit<StoredTeamRun, 'instructions' | 'memberSnapshots' | 'messages' | 'teamUpdatedAt' | 'activeMemberAgentIds' | 'additions' | 'context' | 'policySnapshots'> & {members: {id: string; name: string}[]; messageCount: number};
 export type TeamRunDetail = TeamRunSummary & {messages: TeamMessage[]};
 export const teamLimits = {teams: 50, runs: 200, active: 4, plans: 3, delegated: 8, messages: 200, toolInputBytes: 1024 * 1024, messageCharacters: 8000} as const;
@@ -35,6 +38,13 @@ export function validTeam(value: unknown): value is TeamProfile {
 export function validTeamRun(value: unknown): value is StoredTeamRun {
   if (!value || typeof value !== 'object') return false;
   const r = value as StoredTeamRun;
+  if(r.requiredPolicy!==undefined&&!validRequiredPolicy(r.requiredPolicy))return false;
+  try {for(const step of r.steps??[]){
+    if(step.contract)delegationContract(step.contract);
+    if(step.supersedesSessionId!==undefined && (!text(step.supersedesSessionId,100)||!step.correction||!['procedure','resource','verification'].includes(step.correction.category)||!text(step.correction.change,2000)||!text(step.correction.regression,2000)))return false;
+    if(step.acceptanceReceipt?.scope==='published_candidate_verified'&&(step.contract?.acceptance.kind!=='rabbit_verified_pr'||JSON.stringify(step.acceptanceReceipt).length>131072||!Array.isArray(step.acceptanceReceipt.tasks)||!step.acceptanceReceipt.tasks.length||step.acceptanceReceipt.tasks.length>100))return false;
+    if(step.acceptanceReceipt!==undefined && (!['file_artifact','published_candidate_verified'].includes(step.acceptanceReceipt.scope)||!text(step.acceptanceReceipt.sessionId,100)||step.acceptanceReceipt.sessionId!==step.sessionId||!text(step.acceptanceReceipt.messageId,100)||!text(step.acceptanceReceipt.callId,200)||!/^[a-f0-9]{64}$/.test(step.acceptanceReceipt.sha256)))return false;
+  }}catch{return false;}
   if ((r.routineDispatchId !== undefined && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(r.routineDispatchId)) || (r.development !== undefined && !validDevelopmentBinding(r.development)) || (r.autonomous !== undefined && typeof r.autonomous !== 'boolean') || !text(r.id, 100) || !text(r.teamId, 100) || !text(r.teamName, 80) || !text(r.goal, 8000) || !text(r.instructions, 16000, false) || !text(r.topic, 4000, false) || !text(r.policies, 16000, false) || !date(r.teamUpdatedAt) || !date(r.createdAt) || !date(r.updatedAt)
     || (r.previousRunId !== undefined && !text(r.previousRunId, 100)) || (r.context !== undefined && (!Array.isArray(r.context) || r.context.length > 3 || JSON.stringify(r.context).length > 32000 || !r.context.every(c => c && text(c.runId, 100) && text(c.goal, 2000) && text(c.policies, 2000, false) && text(c.result, 5500, false) && typeof c.excerpt === 'boolean')))
     || !Number.isInteger(r.rounds) || r.rounds < 1 || r.rounds > 3 || !Number.isSafeInteger(r.additions) || r.additions < 0

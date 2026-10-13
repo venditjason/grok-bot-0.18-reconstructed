@@ -1,3 +1,4 @@
+import {playbookTemplateId, validPlaybookSnapshot, type PlaybookTemplateId, type PlaybookSnapshot} from './delegation-playbooks.js';
 /** Browser-safe policy contracts. Catalog access and persistence belong to the host. */
 export const TASK_KINDS = ['routine', 'standard', 'complex'] as const;
 export type TaskKind = typeof TASK_KINDS[number];
@@ -11,9 +12,10 @@ export const EFFICIENCY_PRESETS = [
   {id: 'settings_change', label: '설정 변경', keywords: ['설정 변경', '설정바꾸기', '설정 바꾸기'], maxHistoryTurns: 1, maxHistoryCharacters: 6000},
 ] as const;
 export type AgentPolicyRule = {taskKind: TaskKind; keywords: string[]; connections: PolicyConnectionRoute[]; efficiency?: PolicyEfficiency};
-export type AgentPolicyDraft = {name: string; description: string; defaultTaskKind: TaskKind; rules: AgentPolicyRule[]};
+export type AgentPolicyDraft = {playbookTemplateId?: PlaybookTemplateId; name: string; description: string; defaultTaskKind: TaskKind; rules: AgentPolicyRule[]};
 export type AgentPolicy = AgentPolicyDraft & {id: string; createdAt: string; updatedAt: string};
 export type AgentPolicySelection = {
+  playbook?: PlaybookSnapshot;
   connections: PolicyConnectionRoute[];
   taskKind: TaskKind;
   reason: string;
@@ -88,7 +90,7 @@ export function normalizeAgentPolicyDraft(value: unknown): AgentPolicyDraft {
     return {taskKind: kind, keywords, connections: normalizePolicyConnections(rule.connections), ...(rule.efficiency === undefined ? {} : {efficiency: normalizePolicyEfficiency(rule.efficiency)})};
   });
   if (new Set(parsed.map(rule => rule.taskKind)).size !== TASK_KINDS.length) throw new Error('세 작업 종류의 규칙을 중복 없이 하나씩 지정하세요.');
-  return {name, description, defaultTaskKind, rules: TASK_KINDS.map(kind => parsed.find(rule => rule.taskKind === kind)!)};
+  return {...(input.playbookTemplateId === undefined ? {} : {playbookTemplateId: playbookTemplateId(input.playbookTemplateId)}), name, description, defaultTaskKind, rules: TASK_KINDS.map(kind => parsed.find(rule => rule.taskKind === kind)!)};
 }
 
 export function normalizeAgentPolicy(value: unknown): AgentPolicy {
@@ -120,6 +122,7 @@ export function validAgentPolicySelection(value: unknown): value is AgentPolicyS
   try {
     const selection = object(value, '정책 선택 형식을 확인하세요.');
     normalizePolicyConnections(selection.connections); taskKind(selection.taskKind);
+    if (selection.playbook !== undefined && !validPlaybookSnapshot(selection.playbook)) return false;
     bounded(selection.reason, 1000, '정책 선택 이유를 확인하세요.');
     token(selection.policyId, 100, '정책 ID를 확인하세요.');
     bounded(selection.policyName, AGENT_POLICY_LIMITS.name, '정책 이름을 확인하세요.'); date(selection.policyUpdatedAt);
