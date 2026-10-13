@@ -2,6 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 type JsonObject = Record<string, any>;
+export class CodexRequestFailure extends Error {
+  constructor(message: string, readonly outcome: "not-sent" | "unknown", readonly kind: "closed" | "cancelled" | "timeout" | "protocol" | "write") { super(message); this.name = kind === "cancelled" ? "AbortError" : "CodexRequestFailure"; }
+}
+export interface CodexObservedRequestOptions { signal?: AbortSignal; onWriteAttempt?: () => void; timeoutMs?: number }
+
 export interface CodexServerOptions {
   executable: string;
   args?: readonly string[];
@@ -60,16 +65,33 @@ export class CodexAppServer extends EventEmitter {
   }
 
   request(method: string, params: JsonObject = {}, timeoutMs = this.options.requestTimeoutMs ?? 20_000): Promise<JsonObject> {
-    if (this.closed || this.child == null) return Promise.reject(new Error("Codex app-server is not running."));
+    return this.requestObserved(method, params, {timeoutMs});
+  }
+
+  /** A write attempt is irreversible even when stdin reports backpressure or subsequently fails. */
+  requestObserved(method: string, params: JsonObject = {}, options: CodexObservedRequestOptions = {}): Promise<JsonObject> {
+    const child = this.child;
+    if (options.signal?.aborted) return Promise.reject(new CodexRequestFailure("Codex request cancelled.", "not-sent", "cancelled"));
+    if (this.closed || !child || child.stdin.destroyed || child.stdin.writableEnded) return Promise.reject(new CodexRequestFailure("Codex app-server is not running.", "not-sent", "closed"));
     const id = this.nextId++;
+    let line: string;
+    try { line = `${JSON.stringify({id,method,params})}\n`; } catch { return Promise.reject(new CodexRequestFailure("Codex request could not be encoded.", "not-sent", "protocol")); }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Codex app-server timed out (${method}).`));
-      }, timeoutMs);
-      timer.unref();
-      this.pending.set(id, { resolve, reject, timer });
-      this.send({ id, method, params });
+      let attempted = false, settled = false;
+      const finish = (error?: Error, value?: JsonObject) => {
+        if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener("abort", abort); this.pending.delete(id);
+        if (error) reject(error instanceof CodexRequestFailure ? error : new CodexRequestFailure(error.message, attempted ? "unknown" : "not-sent", "protocol"));
+        else resolve(value ?? {});
+      };
+      const abort = () => finish(new CodexRequestFailure("Codex request cancelled.", attempted ? "unknown" : "not-sent", "cancelled"));
+      const timer = setTimeout(() => finish(new CodexRequestFailure(`Codex app-server timed out (${method}).`, attempted ? "unknown" : "not-sent", "timeout")), options.timeoutMs ?? this.options.requestTimeoutMs ?? 20_000); timer.unref();
+      this.pending.set(id, {resolve:value=>finish(undefined,value),reject:error=>finish(error),timer});
+      options.signal?.addEventListener("abort", abort, {once:true});
+      if (options.signal?.aborted) {abort(); return;}
+      try {
+        attempted = true; options.onWriteAttempt?.();
+        child.stdin.write(line, error => {if (error) finish(new CodexRequestFailure("Codex app-server input closed.", "unknown", "write"));});
+      } catch {finish(new CodexRequestFailure("Codex app-server write failed.", "unknown", "write"));}
     });
   }
 

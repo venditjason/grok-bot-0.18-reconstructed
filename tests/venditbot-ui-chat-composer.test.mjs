@@ -10,8 +10,9 @@ globalThis.window=browser; globalThis.document=browser.document;
 for(const name of ['HTMLElement','HTMLInputElement','HTMLTextAreaElement','Node','Element'])globalThis[name]=browser[name];
 for(const file of ['react.js','vds.js'])browser.eval(await readFile(new URL('../frontend/venditbot/'+file,import.meta.url),'utf8'));
 const React=browser.React,{createRoot,flushSync}=browser.ReactDOM;
-const bundle=await build({entryPoints:['chat-composer','chat-attachments','message-header'].map(name=>new URL('../frontend/venditbot/'+name+'.tsx',import.meta.url).pathname),bundle:true,platform:'node',format:'esm',jsx:'transform',jsxFactory:'React.createElement',jsxFragment:'React.Fragment',write:false,outdir:'/unused'});
+const bundle=await build({entryPoints:['chat-composer','chat-attachments','message-header','chat-turns'].map(name=>new URL('../frontend/venditbot/'+name+'.tsx',import.meta.url).pathname),bundle:true,platform:'node',format:'esm',jsx:'transform',jsxFactory:'React.createElement',jsxFragment:'React.Fragment',write:false,outdir:'/unused'});
 async function load(name){return import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles.find(file=>file.path.endsWith('/'+name+'.js')).text).toString('base64'));}
+const {ChatTurnList}=await load('chat-turns');
 const {ChatComposer}=await load('chat-composer'),{MessageHeader}=await load('message-header'),{useChatAttachments,attachmentDrafts}=await load('chat-attachments');
 after(()=>browser.happyDOM.abort());
 async function settle(){await tick();await new Promise(resolve=>setTimeout(resolve,30));flushSync(()=>{});}
@@ -60,4 +61,16 @@ test('queue-enabled composer keeps typing, attachment, submit and cancel control
  let sent=0,cancelled=0;const v=mount(t,React.createElement(ChatComposer,{value:'다음 질문',onChange(){},onSend(){sent++;},onCancel(){cancelled++;},onChooseAttachments(){},queueWhileRunning:true}));
  const field=v.host.querySelector('textarea');assert.equal(field.disabled,false);assert.ok([...v.host.querySelectorAll('button')].some(node=>node.textContent==='대기열에 추가'));assert.ok([...v.host.querySelectorAll('button')].some(node=>node.textContent==='응답 중단'));
  flushSync(()=>field.dispatchEvent(new browser.KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true})));assert.equal(sent,1);assert.equal(cancelled,0);click([...v.host.querySelectorAll('button')].find(node=>node.textContent==='응답 중단'));assert.equal(cancelled,1);assert.equal(sent,1);
+});
+
+
+test('live steer composer names immediate delivery while unsupported mode remains FIFO',t=>{
+ let sent=0;const props={value:'추가 지시',onChange(){},onSend(){sent++;},onCancel(){},queueWhileRunning:true};const v=mount(t,React.createElement(ChatComposer,{...props,activeInputMode:'steer'}));
+ assert.equal([...v.host.querySelectorAll('.composer-submit')].at(-1).textContent,'진행 중 응답에 추가');click([...v.host.querySelectorAll('.composer-submit')].at(-1));assert.equal(sent,1);
+ v.render(React.createElement(ChatComposer,{...props,activeInputMode:'fifo'}));assert.equal([...v.host.querySelectorAll('.composer-submit')].at(-1).textContent,'대기열에 추가');
+});
+test('unknown steer receipt has no retry, cancel or continue control and retains its text',t=>{
+ const turn={id:'11111111-1111-4111-8111-111111111111',sessionId:'a',text:'접수 불명 원본',attachments:[],createdAt:'2026-01-01',status:'paused',delivery:{mode:'steer',phase:'unknown',attemptId:'a',threadId:'t',turnId:'u',answerId:'m'}};
+ const v=mount(t,React.createElement(ChatTurnList,{turns:[turn],busy:false,onCancel(){throw Error('no cancel')},onRetry(){throw Error('no retry')},onResume(){throw Error('no resume')}}));
+ assert.match(v.host.textContent,/접수 미확인/);assert.match(v.host.textContent,/접수 불명 원본/);assert.equal(v.host.querySelectorAll('button').length,0);
 });

@@ -805,32 +805,24 @@ test('agent priorities validate all routes, normalize aliases and snapshot the s
   await f.call('deleteSession', {id: session.id}); await f.call('deleteProfile', {id: backup.id});
 });
 
-test('fallback records ordered failures and the successful route, retries priority next turn and preserves completed history', async t => {
-  const f = await fixture(t), api = await f.api(), {agent, routes} = await fallbackAgent(f, api);
-  const session = await f.call('createSession', {agentId: agent.id});
-  api.enqueue(({response}) => rejectApi(response, 401)); api.enqueue(({response}) => finish(response, '예비 연결 완료'));
-  const first = await runToEnd(f, session.id, '첫 요청');
-  assert.equal(first.connectionId, 'backup-qa'); assert.equal(first.model, 'backup-model'); assert.deepEqual(first.connections, routes);
-  assert.deepEqual(first.messages[1].attempts.map(({connectionId, status}) => ({connectionId, status})), [{connectionId: 'primary-qa', status: 'failed'}, {connectionId: 'backup-qa', status: 'completed'}]);
-  assert.ok(first.messages[1].attempts[0].error); assert.equal(first.messages[1].text, '예비 연결 완료');
-  assert.equal(api.requests[0].headers.authorization, `Bearer ${testKey}`); assert.equal(api.requests[1].headers.authorization, 'Bearer sk-backup-only-qa-key');
-  assert.ok(f.events.some(event => event.type === 'session' && event.session.messages.at(-1)?.attempts?.[1]?.status === 'running'));
-  await f.call('saveAgent', {agent: {...agent, connections: [...routes].reverse(), instructions: '변경된 역할'}});
-  api.enqueue(({response}) => finish(response, '우선 연결 복귀')); const second = await runToEnd(f, session.id, '둘째 요청');
-  assert.equal(api.requests[2].body.model, 'primary-model'); assert.equal(second.connectionId, 'primary-qa');
-  assert.equal(second.messages[3].attempts.length, 1); assert.equal(second.messages[1].attempts[1].connectionId, 'backup-qa');
-  assert.deepEqual(api.requests[2].body.messages.filter(m => m.role !== 'system').map(m => plain(m.content)), ['첫 요청', '예비 연결 완료', '둘째 요청']);
-  assert.match(plain(api.requests[2].body.messages[0].content), /공통 역할 지시문/);
-  assert.deepEqual(second.connections, routes); assert.deepEqual(api.failures, []);
+test('a wired API failure keeps one route and explicit next input preserves the priority snapshot', async t => {
+ const f=await fixture(t),api=await f.api(),{agent,routes}=await fallbackAgent(f,api),session=await f.call('createSession',{agentId:agent.id});
+ api.enqueue(({response})=>rejectApi(response,401));const first=await runToEnd(f,session.id,'첫 요청');
+ assert.equal(first.taskStatus,'failed');assert.equal(first.connectionId,'primary-qa');assert.deepEqual(first.connections,routes);
+ assert.equal(first.messages[1].attempts.length,1);assert.equal(first.messages[1].attempts[0].status,'failed');assert.ok(first.messages[1].attempts[0].error);assert.equal(api.requests.length,1);
+ api.enqueue(({response})=>finish(response,'명시적 새 요청 완료'));const second=await runToEnd(f,session.id,'둘째 요청');
+ assert.equal(second.taskStatus,'completed');assert.equal(api.requests.length,2);assert.equal(api.requests[1].body.model,'primary-model');
+ assert.deepEqual(api.requests[1].body.messages.filter(m=>m.role!=='system').map(m=>plain(m.content)),['둘째 요청']);
+ assert.equal(second.messages[0].text,'첫 요청');assert.equal(second.messages[1].status,'failed');assert.deepEqual(second.connections,routes);
 });
 
-test('all unavailable routes fail visibly without corrupting the priority snapshot', async t => {
-  const f = await fixture(t), api = await f.api(), {agent, routes} = await fallbackAgent(f, api), session = await f.call('createSession', {agentId: agent.id});
-  for (const status of [429, 429, 429, 503, 503, 503]) api.enqueue(({response}) => rejectApi(response, status));
-  const finished = await runToEnd(f, session.id, '모두 실패');
-  assert.equal(finished.taskStatus, 'failed'); assert.equal(finished.messages[1].status, 'failed'); assert.equal(finished.messages[1].text, '');
-  assert.deepEqual(finished.messages[1].attempts.map(a => a.status), ['failed', 'failed']); assert.ok(finished.messages[1].attempts.every(a => a.error));
-  assert.deepEqual(finished.connections, routes); assert.deepEqual(api.requests.map(request => request.body.model), ['primary-model', 'primary-model', 'primary-model', 'backup-model', 'backup-model', 'backup-model']);
+test('rate-limited API uses only its existing same-route retry policy and never changes provider', async t => {
+ const f=await fixture(t),api=await f.api(),{agent,routes}=await fallbackAgent(f,api),session=await f.call('createSession',{agentId:agent.id});
+ for(const status of [429,429,429])api.enqueue(({response})=>rejectApi(response,status));
+ const finished=await runToEnd(f,session.id,'실패 보존');
+ assert.equal(finished.taskStatus,'failed');assert.equal(finished.messages[1].text,'');
+ assert.deepEqual(finished.messages[1].attempts.map(a=>a.status),['failed']);assert.ok(finished.messages[1].attempts[0].error);
+ assert.deepEqual(finished.connections,routes);assert.deepEqual(api.requests.map(r=>r.body.model),['primary-model','primary-model','primary-model']);
 });
 
 for (const mode of ['partial', 'cancel', 'storage']) test(`fallback never repeats a ${mode} turn`, async t => {
@@ -866,37 +858,35 @@ test('an approved file action blocks fallback if its following provider request 
   assert.equal(await readFile(path.join(project, 'once.txt'), 'utf8'), 'exactly one approved write'); assert.equal(saved.messages[1].tools[0].status, 'completed');
 });
 
-test('Claude fallback hands off completed context after another provider and only resumes its matching successful route', async t => {
-  const f = await fixture(t, {claudeRuntime: true}), api = await f.api(), primary = await configured(f, api);
-  const agent = (await f.call('saveAgent', {agent: {name: '문맥 전환', instructions: '이전 대화 보존', connections: [{connectionId: primary.id, model: primary.model}, {connectionId: 'claude-code', model: 'default', effort: 'high'}]}})).agents[0];
-  const session = await f.call('createSession', {agentId: agent.id});
-  const readInput = async () => JSON.parse(await readFile(path.join(f.profileRoot, 'providers', 'claude', 'last-inference-input.json'), 'utf8'));
-  api.enqueue(({response}) => rejectApi(response, 401)); let saved = await runToEnd(f, session.id, 'Claude 첫 요청');
-  assert.equal(saved.connectionId, 'claude-code'); assert.equal(saved.providerSessionId, 'owned-claude-session'); assert.ok(saved.providerSessionBinding);
-  assert.equal((await readInput()).input, 'Claude 첫 요청');
-  api.enqueue(({response}) => finish(response, 'API의 중간 답변')); saved = await runToEnd(f, session.id, 'API로 이어서');
-  assert.equal(saved.connectionId, primary.id); assert.equal(saved.providerSessionId, undefined); assert.equal(saved.providerSessionBinding, undefined);
-  api.enqueue(({response}) => rejectApi(response, 401)); saved = await runToEnd(f, session.id, 'Claude 재진입');
-  assert.equal(saved.messages.at(-1).status, 'completed'); const handoff = await readInput(); assert.equal(handoff.args.includes('--resume'), false);
-  const context = JSON.parse(handoff.input.slice(handoff.input.indexOf('{')));
-  assert.equal(context.format, 'venditbot.history-handoff.v1'); assert.equal(context.currentUserMessage.content, 'Claude 재진입');
-  assert.deepEqual(context.previousCompletedMessages.map(m => m.content), ['Claude 첫 요청', 'Claude OK', 'API로 이어서', 'API의 중간 답변']);
-  api.enqueue(({response}) => rejectApi(response, 401)); saved = await runToEnd(f, session.id, '같은 Claude 이어서');
-  const resumed = await readInput(); assert.equal(resumed.input, '같은 Claude 이어서'); assert.ok(resumed.args.includes('--resume')); assert.ok(resumed.args.includes('--fork-session'));
-  assert.equal(saved.providerSessionId, 'owned-claude-session-fork'); assert.deepEqual(api.failures, []);
+test('a wired API failure cannot hand the same request to a connected Claude subscription', async t => {
+ const f=await fixture(t,{claudeRuntime:true}),api=await f.api(),primary=await configured(f,api);
+ const agent=(await f.call('saveAgent',{agent:{name:'문맥 보존',instructions:'이전 대화 보존',connections:[{connectionId:primary.id,model:primary.model},{connectionId:'claude-code',model:'default',effort:'high'}]}})).agents[0];
+ const session=await f.call('createSession',{agentId:agent.id});api.enqueue(({response})=>rejectApi(response,401));
+ const saved=await runToEnd(f,session.id,'한 번만 요청');assert.equal(saved.taskStatus,'failed');assert.equal(saved.connectionId,primary.id);
+ assert.equal(saved.messages[1].attempts.length,1);assert.equal(saved.providerSessionId,undefined);assert.equal(api.requests.length,1);
+ await assert.rejects(readFile(path.join(f.profileRoot,'providers','claude','last-inference-input.json')),e=>e.code==='ENOENT');
+ api.enqueue(({response})=>finish(response,'명시적 후속'));const next=await runToEnd(f,session.id,'새 입력');assert.equal(next.taskStatus,'completed');assert.equal(next.connectionId,primary.id);assert.equal(next.providerSessionId,undefined);
 });
 
-test('same-provider different-model fallback preserves each selected effort and returns the actual successful model', async t => {
-  const f = await fixture(t, {codexRuntime: true});
-  const routes = [{connectionId: 'codex', model: 'gpt-6-astra', effort: 'xhigh'}, {connectionId: 'codex', model: 'gpt-6-sol', effort: 'medium'}];
-  const agent = (await f.call('saveAgent', {agent: {name: '같은 공급자', instructions: '고정 역할', connections: routes}})).agents[0];
-  const catalogPath = path.join(f.appRoot, 'runtimes', 'codex', 'bin', 'models.json'); const catalog = JSON.parse(await readFile(catalogPath, 'utf8'));
-  catalog.qaFailModels = ['gpt-6-astra']; await writeFile(catalogPath, JSON.stringify(catalog));
-  const session = await f.call('createSession', {agentId: agent.id}), saved = await runToEnd(f, session.id, '두 모델로 이어서');
-  assert.equal(saved.model, 'gpt-6-sol'); assert.equal(saved.effort, 'medium'); assert.deepEqual(saved.connections, routes);
-  assert.deepEqual(saved.messages[1].attempts.map(a => [a.model, a.effort, a.status]), [['gpt-6-astra', 'xhigh', 'failed'], ['gpt-6-sol', 'medium', 'completed']]);
-  const calls = (await readFile(path.join(f.profileRoot, 'providers', 'codex', 'desktop-protocol.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls.filter(call => call.method === 'turn/start').map(call => [call.params.model, call.params.effort]), [['gpt-6-astra', 'xhigh'], ['gpt-6-sol', 'medium']]);
+test('a wired Codex terminal failure cannot silently change model or effort', async t => {
+ const f=await fixture(t,{codexRuntime:true}),routes=[{connectionId:'codex',model:'gpt-6-astra',effort:'xhigh'},{connectionId:'codex',model:'gpt-6-sol',effort:'medium'}];
+ const agent=(await f.call('saveAgent',{agent:{name:'동일 공급자',instructions:'고정 역할',connections:routes}})).agents[0];
+ const catalogPath=path.join(f.appRoot,'runtimes','codex','bin','models.json'),catalog=JSON.parse(await readFile(catalogPath,'utf8'));catalog.qaFailModels=['gpt-6-astra'];await writeFile(catalogPath,JSON.stringify(catalog));
+ const session=await f.call('createSession',{agentId:agent.id}),saved=await runToEnd(f,session.id,'한 모델만');
+ assert.equal(saved.taskStatus,'failed');assert.equal(saved.model,'gpt-6-astra');assert.equal(saved.effort,'xhigh');assert.deepEqual(saved.connections,routes);
+ assert.deepEqual(saved.messages[1].attempts.map(a=>[a.model,a.effort,a.status]),[['gpt-6-astra','xhigh','failed']]);
+ const calls=(await readFile(path.join(f.profileRoot,'providers','codex','desktop-protocol.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+ assert.deepEqual(calls.filter(c=>c.method==='turn/start').map(c=>[c.params.model,c.params.effort]),[['gpt-6-astra','xhigh']]);
+});
+
+test('proven Codex preflight failure may use a preconfigured route without a native inference request', async t => {
+ const f=await fixture(t,{codexRuntime:true}),api=await f.api(),backup=await configured(f,api);
+ const agent=(await f.call('saveAgent',{agent:{name:'전송 전 대체',instructions:'역할',connections:[{connectionId:'codex',model:'gpt-6-astra',effort:'xhigh'},{connectionId:backup.id,model:backup.model}]}})).agents[0];
+ const session=await f.call('createSession',{agentId:agent.id}),catalogPath=path.join(f.appRoot,'runtimes','codex','bin','models.json'),catalog=JSON.parse(await readFile(catalogPath,'utf8'));
+ catalog.qaDisconnected=true;await writeFile(catalogPath,JSON.stringify(catalog));api.enqueue(({response})=>finish(response,'설정된 대체 연결 완료'));
+ const saved=await runToEnd(f,session.id,'전송 전 실패');assert.equal(saved.taskStatus,'completed');assert.equal(saved.connectionId,backup.id);assert.equal(api.requests.length,1);
+ assert.deepEqual(saved.messages[1].attempts.map(a=>a.status),['failed','completed']);
+ const calls=(await readFile(path.join(f.profileRoot,'providers','codex','desktop-protocol.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.equal(calls.filter(c=>c.method==='turn/start').length,0);
 });
 
 test('a failed Claude fork preserves its last successful parent for explicit retry', async t => {
@@ -1914,4 +1904,53 @@ for(const mode of ['success','pending_then_accept','extra_leader_post','changed_
  if(mode==='extra_leader_post'){const leader=(await f.session(result.steps.at(-1).sessionId)).messages.at(-1);assert.equal(leader.tools.at(-1).status,'failed');assert.match(leader.tools.at(-1).summary,/대표는 원격 개발/);}
  if(mode==='changed_final_revision')assert.match(result.error,/수용 뒤/);
  assert.deepEqual(api.failures,[]);
+});
+
+
+test('real IPC steering keeps one conversation and native turn; accepted instructions persist into the next prompt',async t=>{
+ const f=await fixture(t,{codexRuntime:true}),catalogPath=path.join(f.appRoot,'runtimes/codex/bin/models.json'),catalog=JSON.parse(await readFile(catalogPath,'utf8'));catalog.qaHoldForSteer=2;await writeFile(catalogPath,JSON.stringify(catalog));
+ const models=await f.call('listModels',{provider:'codex'}),session=await f.call('createSession',{connectionId:'codex',model:models.models[0].id});
+ const active=f.event(e=>e.type==='active-input'&&e.sessionId===session.id&&e.capability==='steer'),end=f.event(e=>e.type==='run-end'&&e.sessionId===session.id);
+ await f.call('send',{requestId:randomUUID(),sessionId:session.id,text:'첫 지시'});await active;
+ const first=randomUUID(),second=randomUUID();const one=await f.call('send',{requestId:first,sessionId:session.id,text:'첫 추가 지시'});assert.equal(one.delivery.mode,'steer');await f.call('send',{requestId:first,sessionId:session.id,text:'첫 추가 지시'});await f.call('send',{requestId:second,sessionId:session.id,text:'두 번째 추가 지시'});await end;
+ const saved=await f.session(session.id);assert.equal(saved.id,session.id);assert.equal(saved.messages.length,2);assert.deepEqual(saved.messages[1].acceptedInputs.map(x=>[x.id,x.text]),[[first,'첫 추가 지시'],[second,'두 번째 추가 지시']]);assert.equal(saved.messages[1].status,'completed');
+ const lines=()=>readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8').then(s=>s.trim().split('\n').map(JSON.parse));let log=await lines();assert.equal(log.filter(x=>x.method==='turn/start').length,1);assert.equal(log.filter(x=>x.method==='turn/steer').length,2);assert.equal(new Set(log.filter(x=>x.method==='turn/steer').map(x=>x.params.expectedTurnId)).size,1);
+ catalog.qaHoldForSteer=0;await writeFile(catalogPath,JSON.stringify(catalog));await runToEnd(f,session.id,'이전 추가 지시를 요약');log=await lines();const history=log.filter(x=>x.method==='thread/inject_items').at(-1);assert.match(JSON.stringify(history),/첫 추가 지시/);assert.match(JSON.stringify(history),/두 번째 추가 지시/);
+});
+test('real IPC lost steer acknowledgement never retries or changes into FIFO after native completion',async t=>{
+ const f=await fixture(t,{codexRuntime:true}),catalogPath=path.join(f.appRoot,'runtimes/codex/bin/models.json'),catalog=JSON.parse(await readFile(catalogPath,'utf8'));catalog.qaHoldForSteer=1;catalog.qaSteerLostAck=true;await writeFile(catalogPath,JSON.stringify(catalog));
+ const models=await f.call('listModels',{provider:'codex'}),session=await f.call('createSession',{connectionId:'codex',model:models.models[0].id}),active=f.event(e=>e.type==='active-input'&&e.capability==='steer'),end=f.event(e=>e.type==='run-end'&&e.sessionId===session.id);
+ await f.call('send',{requestId:randomUUID(),sessionId:session.id,text:'원래 지시'});await active;const id=randomUUID();await f.call('send',{requestId:id,sessionId:session.id,text:'ACK 모호한 추가'});await end;await f.call('send',{requestId:id,sessionId:session.id,text:'ACK 모호한 추가'});const state=await f.call('state');assert.equal(state.chatTurns.find(x=>x.id===id).delivery.phase,'unknown');await f.denied('retryChatTurn',{id},/다시 실행/);await f.denied('resumeChatTurns',{sessionId:session.id},/미확인/);
+ const log=(await readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.equal(log.filter(x=>x.method==='turn/start').length,1);assert.equal(log.filter(x=>x.method==='turn/steer').length,1);assert.equal((await f.session(session.id)).messages[1].acceptedInputs,undefined);
+});
+
+
+for (const phase of ['accepted','intent']) test(`real IPC restart reconciles ${phase} steering without launching or replaying input`, async t => {
+ const now=new Date().toISOString(),sessionId=randomUUID(),answerId=randomUUID(),id=randomUUID(),delivery={mode:'steer',phase,attemptId:'durable-attempt',threadId:'durable-thread',turnId:'durable-turn',answerId};
+ const f=await fixture(t,{codexRuntime:true,seed:async({profileRoot})=>{
+  const session={id:sessionId,title:'합성 복구',connectionId:'codex',model:'gpt-6.1-sol',createdAt:now,updatedAt:now,taskStatus:'running',messages:[{id:randomUUID(),role:'user',text:'원본 지시',createdAt:now,status:'completed'},{id:answerId,role:'assistant',text:'부분 응답',createdAt:now,status:'running'}]};
+  await writeFile(path.join(profileRoot,'conversations.json'),JSON.stringify({version:1,sessions:[session]}));
+  await writeFile(path.join(profileRoot,'chat-turns.json'),JSON.stringify({version:1,turns:[{id,sessionId,text:'복구할 추가 입력',attachments:[],createdAt:now,status:'running',delivery}]}));
+ }});
+ let state=await f.call('state'),turn=state.chatTurns.find(x=>x.id===id),saved=await f.session(sessionId);
+ assert.equal(saved.messages[0].text,'원본 지시');assert.equal(saved.messages[1].text,'부분 응답');
+ assert.equal(turn.delivery.phase,phase==='intent'?'unknown':'accepted');
+ assert.equal(saved.messages[1].acceptedInputs?.[0]?.text,phase==='accepted'?'복구할 추가 입력':undefined);
+ await f.call('send',{requestId:id,sessionId,text:'복구할 추가 입력'});
+ state=await f.call('state');assert.deepEqual(state.queue,{running:[],queued:[]});
+ await f.denied('retryChatTurn',{id},/다시 실행/);
+ if(phase==='intent')await f.denied('resumeChatTurns',{sessionId},/미확인/);
+ const log=await readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8').catch(e=>{if(e.code==='ENOENT')return '';throw e});
+ assert.equal(log.split('\n').filter(Boolean).map(JSON.parse).filter(x=>x.method==='turn/start'||x.method==='turn/steer').length,0);
+});
+
+test('real IPC cancellation after steer ACK stops the original turn once and retains accepted text',async t=>{
+ const f=await fixture(t,{codexRuntime:true}),catalogPath=path.join(f.appRoot,'runtimes/codex/bin/models.json'),catalog=JSON.parse(await readFile(catalogPath,'utf8'));catalog.qaHoldForSteer=2;await writeFile(catalogPath,JSON.stringify(catalog));
+ const models=await f.call('listModels',{provider:'codex'}),session=await f.call('createSession',{connectionId:'codex',model:models.models[0].id}),id=randomUUID();
+ const active=f.event(e=>e.type==='active-input'&&e.capability==='steer'),end=f.event(e=>e.type==='run-end'&&e.sessionId===session.id);
+ await f.call('send',{requestId:randomUUID(),sessionId:session.id,text:'원래 지시'});await active;
+ const ack=f.event(e=>e.type==='chat-turns'&&e.turns.some(t=>t.id===id&&t.delivery?.phase==='accepted'));await f.call('send',{requestId:id,sessionId:session.id,text:'중단해도 보존'});await ack;
+ await f.call('cancelChatTurn',{id});await end;const saved=await f.session(session.id);assert.equal(saved.messages[1].status,'cancelled');assert.equal(saved.messages[1].acceptedInputs[0].text,'중단해도 보존');
+ await f.call('send',{requestId:id,sessionId:session.id,text:'중단해도 보존'});
+ const log=(await readFile(path.join(f.profileRoot,'providers/codex/desktop-protocol.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.equal(log.filter(x=>x.method==='turn/start').length,1);assert.equal(log.filter(x=>x.method==='turn/steer').length,1);assert.equal(log.filter(x=>x.method==='turn/interrupt').length,1);
 });

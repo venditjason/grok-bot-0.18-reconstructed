@@ -376,3 +376,18 @@ test('a superseded in-flight reader cannot retry or overwrite a newer applied sn
   clock.changed(); await clock.read(async () => 'current', value => { shown = value; }, true);
   finish('old'); await old; assert.equal(reads, 1); assert.equal(shown, 'current');
 });
+
+
+test('active input and provider retry status remain scoped to the current conversation and answer', () => {
+ let state=initial();
+ state=reduceStateEvent(state,{type:'active-input',sessionId:'first',capability:'steer'});
+ assert.equal(state.activeRun.inputCapability,'steer');
+ assert.equal(reduceStateEvent(state,{type:'active-input',sessionId:'second',capability:'fifo'}),state);
+ state=reduceStateEvent(state,{type:'queue',running:['first'],queued:[]});assert.equal(state.activeRun.inputCapability,'steer');
+ state=reduceStateEvent(state,{type:'provider-status',sessionId:'first',messageId:'first-answer',status:'retrying'});
+ assert.equal(state.sessions[0].messages[0].providerStatus,'retrying');assert.equal(state.sessions[1].messages[0].providerStatus,undefined);
+ state=reduceStateEvent(state,{type:'delta',sessionId:'first',messageId:'first-answer',delta:'ok'});assert.equal(state.sessions[0].messages[0].providerStatus,undefined);
+ state=reduceStateEvent(state,{type:'queue',running:['second'],queued:[]});assert.equal(state.activeRun.inputCapability,undefined);
+ state.sessions[0].messages[0].status='completed';
+ assert.equal(reduceStateEvent(state,{type:'provider-status',sessionId:'first',messageId:'first-answer',status:'retrying'}).sessions[0].messages[0].providerStatus,undefined);
+});

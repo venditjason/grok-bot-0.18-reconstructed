@@ -11,7 +11,9 @@ export type ToolRecord = { callId: string; name: string; path?: string; status: 
 export type ConnectionRoute = { connectionId: string; model: string; effort?: string };
 export type ConnectionAttempt = ConnectionRoute & { status: 'running' | 'failed' | 'completed'; error?: string };
 export type AvatarRequestRecord = {requestId: string; ownerKey: string; sessionId?: string; phase: 'validating' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; assetId?: string; error?: string};
-export type ChatMessage = { requiredPolicy?: RequiredPolicyPin; actionReceipt?: ActionReceipt; attachments?: ChatAttachment[]; id: string; role: 'user' | 'assistant'; text: string; createdAt: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; tools?: ToolRecord[]; attempts?: ConnectionAttempt[]; routeSelection?: AgentPolicySelection };
+export type AcceptedChatInput = {id: string; text: string; createdAt: string; attemptId: string; turnId: string};
+export function validAcceptedInputs(value: unknown): value is AcceptedChatInput[] { return Array.isArray(value) && value.length <= 100 && new Set(value.map(v => v?.id)).size === value.length && value.every(v => v && /^[0-9a-f-]{36}$/i.test(v.id) && text(v.text,100000) && !!v.text.trim() && date(v.createdAt) && text(v.attemptId,200) && !!v.attemptId && text(v.turnId,256) && !!v.turnId); }
+export type ChatMessage = { acceptedInputs?: AcceptedChatInput[]; requiredPolicy?: RequiredPolicyPin; actionReceipt?: ActionReceipt; attachments?: ChatAttachment[]; id: string; role: 'user' | 'assistant'; text: string; createdAt: string; status: 'running' | 'completed' | 'failed' | 'cancelled'; error?: string; tools?: ToolRecord[]; attempts?: ConnectionAttempt[]; routeSelection?: AgentPolicySelection };
 export type ChatSession = { requiredPolicy?: RequiredPolicyPin; queuedAttachments?:ChatAttachment[]; routineDispatchId?: string; development?: DevelopmentBinding; id: string; title: string; connectionId: string; model: string; effort?: string; connections?: ConnectionRoute[]; agentId?: string; agentName?: string; instructions?: string; teamRunId?: string; teamStepIndex?: number; purpose?: 'avatar'; avatarRequest?: AvatarRequestRecord; automation?: {policyId: string}; policySnapshot?: AgentPolicy; policyAllowedConnections?: ConnectionRoute[]; policyTaskText?: string; routeSelection?: AgentPolicySelection; taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'; queuedPrompt?: string; createdAt: string; updatedAt: string; workspacePath?: string; providerSessionId?: string; providerSessionBinding?: string; messages: ChatMessage[] };
 
 export function validPolicySnapshot(value: unknown): value is AgentPolicy {try {normalizeAgentPolicy(value); return true;} catch {return false;}}
@@ -52,7 +54,7 @@ function validSession(value: unknown): value is ChatSession {
     && (s.routeSelection === undefined || validAgentPolicySelection(s.routeSelection))
     && (s.taskStatus === undefined || ['queued', 'running', 'completed', 'failed', 'cancelled'].includes(s.taskStatus)) && (s.queuedPrompt === undefined || text(s.queuedPrompt, 500_000))
     && Array.isArray(s.messages) && s.messages.length <= 20_000 && new Set(s.messages.map(m => m?.id)).size === s.messages.length
-    && s.messages.every(m => m && (m.requiredPolicy===undefined||validRequiredPolicy(m.requiredPolicy)) && (m.actionReceipt===undefined||validActionReceipt(m.actionReceipt)) && (m.attachments===undefined||validChatAttachments(m.attachments)) && text(m.id, 100) && ['user', 'assistant'].includes(m.role) && text(m.text, 2_000_000) && date(m.createdAt)
+    && s.messages.every(m => m && (m.acceptedInputs === undefined || m.role === 'assistant' && validAcceptedInputs(m.acceptedInputs)) && (m.requiredPolicy===undefined||validRequiredPolicy(m.requiredPolicy)) && (m.actionReceipt===undefined||validActionReceipt(m.actionReceipt)) && (m.attachments===undefined||validChatAttachments(m.attachments)) && text(m.id, 100) && ['user', 'assistant'].includes(m.role) && text(m.text, 2_000_000) && date(m.createdAt)
       && ['running', 'completed', 'failed', 'cancelled'].includes(m.status) && (m.error === undefined || text(m.error, 2000))
       && (m.routeSelection === undefined || validAgentPolicySelection(m.routeSelection))
       && (m.attempts === undefined || (Array.isArray(m.attempts) && m.attempts.length > 0 && m.attempts.length <= 8 && m.attempts.every(a => validConnectionRoute(a) && ['running', 'failed', 'completed'].includes(a.status) && (a.error === undefined || text(a.error, 2000)))))
@@ -218,7 +220,8 @@ export function completedHistory(session: ChatSession, currentUserId: string, co
     if (message.id === currentUserId) { result.push({role: 'user', content: content(message)}); break; }
     const next = session.messages[i + 1];
     if (message.role === 'user' && next?.role === 'assistant' && next.status === 'completed') {
-      result.push({role: 'user', content: content(message)});
+      const grouped = next.acceptedInputs?.length ? {...message, text: message.text + next.acceptedInputs.map(input => `\n\n[추가 사용자 지시]\n${input.text}`).join('')} : message;
+      result.push({role: 'user', content: content(grouped)});
       for (const tool of next.tools ?? []) if (tool.input !== undefined && tool.output !== undefined) result.push(
         {role: 'assistant', content: [{type: 'tool-call', toolCallId: tool.callId, toolName: tool.name, args: tool.input}]},
         {role: 'tool', content: [{type: 'tool-result', toolCallId: tool.callId, toolName: tool.name, result: tool.output}]},
@@ -230,7 +233,7 @@ export function completedHistory(session: ChatSession, currentUserId: string, co
 }
 
 export function sessionMarkdown(session: ChatSession): string {
-  return `# ${session.title}\n\n연결: ${session.connectionId}\n모델: ${session.model || '공급자 기본값'}\nEffort: ${session.effort || '공급자 기본값'}\n` + session.messages.map(m => `\n## ${m.role === 'user' ? '사용자' : '벤디트봇'} · ${m.createdAt}\n\n${m.text}${m.attachments?.length ? '\n\n첨부: '+m.attachments.map(a=>a.name+' ('+a.bytes+' bytes; SHA256 '+a.sha256+')').join(', ') : ''}\n${m.status !== 'completed' ? `\n[${m.status}] ${m.error ?? ''}\n` : ''}`).join('');
+  return `# ${session.title}\n\n연결: ${session.connectionId}\n모델: ${session.model || '공급자 기본값'}\nEffort: ${session.effort || '공급자 기본값'}\n` + session.messages.map(m => `\n## ${m.role === 'user' ? '사용자' : '벤디트봇'} · ${m.createdAt}\n\n${m.acceptedInputs?.length ? m.acceptedInputs.map(input => `추가 사용자 지시 · ${input.createdAt}\n\n${input.text}\n\n`).join('') : ''}${m.text}${m.attachments?.length ? '\n\n첨부: '+m.attachments.map(a=>a.name+' ('+a.bytes+' bytes; SHA256 '+a.sha256+')').join(', ') : ''}\n${m.status !== 'completed' ? `\n[${m.status}] ${m.error ?? ''}\n` : ''}`).join('');
 }
 
 export function safeError(error: unknown): string {
